@@ -41,7 +41,8 @@ MODALITY_MAP = {
     "features2text": "multimodalhugs.training_setup.features2text_training_setup",
     "signwriting2text": "multimodalhugs.training_setup.signwriting2text_training_setup",
     "image2text": "multimodalhugs.training_setup.image2text_training_setup",
-    "text2text": "multimodalhugs.training_setup.text2text_training_setup"
+    "text2text": "multimodalhugs.training_setup.text2text_training_setup",
+    "speech2text": "multimodalhugs.training_setup.speech2text_training_setup"
 }
 
 def call_setup(func, sa):

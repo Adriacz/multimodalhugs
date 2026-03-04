@@ -6,4 +6,5 @@ from .datasets.video2text import Video2TextDataset
 from .datasets.bilingual_text2text import BilingualText2TextDataset
 from .datasets.bilingual_image2text import BilingualImage2TextDataset
 from .datasets.features2text import Features2TextDataset
+from .datasets.speech2text import Speech2TextDataset
 from .datacollators.multimodal_datacollator import DataCollatorMultimodalSeq2Seq

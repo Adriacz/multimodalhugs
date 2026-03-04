@@ -3,7 +3,7 @@ from typing import Optional, Literal
 
 @dataclass
 class SetupArguments:
-    modality: Literal["pose2text","signwriting2text","image2text","text2text","features2text","video2text"] = field(
+    modality: Literal["pose2text","signwriting2text","image2text","text2text","features2text","video2text","speech2text"] = field(
         metadata={"help": "Training setup modality."}
     )
     config_path: str = field(

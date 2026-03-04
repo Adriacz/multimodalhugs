@@ -100,6 +100,8 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
         self.name = "Speech2text"
         self.config = config
         self.max_frames = config.max_duration
+        self.max_duration = config.max_duration
+        self.min_duration = config.min_duration
         self.min_frames = config.min_duration
 
     def _info(self):
