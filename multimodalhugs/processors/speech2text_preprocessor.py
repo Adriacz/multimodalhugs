@@ -218,7 +218,7 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
 
         Returns:
             {
-                "input_audio":    Tensor [B, n_mels, T_max],
+                "input_frames":    Tensor [B, n_mels, T_max],
                 "attention_mask": Tensor [B, T_max],  (1 = real, 0 = pad)
             }
         """
@@ -234,7 +234,7 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
         # so [n_mels, T_i] tensors are padded to [n_mels, T_max].
         padded, masks = pad_and_create_mask(sequences)
         return {
-            "input_audio":    padded,  # [B, n_mels, T_max]
+            "input_frames":    padded,  # [B, n_mels, T_max]
             "attention_mask": masks,   # [B, T_max]
         }, kwargs
 

@@ -24,12 +24,15 @@ from transformers import (
     set_seed,
     GenerationConfig,
 )
+
 from multimodalhugs.processors import (
     SignwritingProcessor,
     Pose2TextTranslationProcessor,
+    Video2TextTranslationProcessor,
     Image2TextTranslationProcessor,
     Text2TextTranslationProcessor,
-    Features2TextTranslationProcessor
+    Features2TextTranslationProcessor,
+    Speech2TextTranslationProcessor
 )
 
 import multimodalhugs.models
@@ -49,6 +52,9 @@ AutoProcessor.register("image2text_translation_processor", Image2TextTranslation
 
 Text2TextTranslationProcessor.register_for_auto_class()
 AutoProcessor.register("text2text_translation_processor", Text2TextTranslationProcessor)
+
+Speech2TextTranslationProcessor.register_for_auto_class()
+AutoProcessor.register("speech2text_processor", Speech2TextTranslationProcessor)
 
 
 import logging

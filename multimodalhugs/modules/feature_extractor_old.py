@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import (
     CLIPConfig, CLIPModel, M2M100Config, M2M100Model, 
-    PreTrainedModel, PretrainedConfig, WhisperModel
+    PreTrainedModel, PretrainedConfig
 )
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
@@ -116,10 +116,6 @@ class FeatureExtractor(nn.Module):
             if isinstance(self.feature_extractor, CLIPModel):
                 self.feature_extractor.text_model = None
                 self.feature_extractor.text_projection = None
-
-            # Special handling for Whisper: we only need the encoder
-            if isinstance(self.feature_extractor, WhisperModel):
-                self.feature_extractor.decoder = None
         else:
             self.feature_extractor = None
 
@@ -130,12 +126,4 @@ class FeatureExtractor(nn.Module):
             x = torch.flatten(x, start_dim=0, end_dim=1) # [B, T, C, H, W] -> [(B x T), C, H, W]
             x = self.feature_extractor.get_image_features(pixel_values=x)
             x = torch.unflatten(x, 0, (B, T)) # [(B x T), E] -> [B, T, E]
-
-        elif self.feature_extractor_type == "whisper":
-            # x shape: [B, T_audio] o [B, 80, T_frames] (mel spectrogram)
-            encoder_outputs = self.feature_extractor.encoder(
-            input_features=x, return_dict=True)
-
-            x = encoder_outputs.last_hidden_state  # [B, T, 768]
-       
         return x
