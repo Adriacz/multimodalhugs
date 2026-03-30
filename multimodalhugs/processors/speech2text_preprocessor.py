@@ -225,11 +225,12 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
         sequences = [
             self._audio_to_tensor(
                 sample["signal"],
-                sample.get("signal_start", 0.0),
-                sample.get("signal_end",   0.0),
+                sample.get("audio_start", 0.0),
+                sample.get("audio_end",   0.0),
             )
             for sample in batch
         ]
+
         # pad_and_create_mask works on the last dim (time) of each tensor,
         # so [n_mels, T_i] tensors are padded to [n_mels, T_max].
         padded, masks = pad_and_create_mask(sequences)
@@ -256,8 +257,8 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
         tensor_signals = [
             self._audio_to_tensor(
                 batch["signal"][i],
-                batch["signal_start"][i],
-                batch["signal_end"][i],
+                batch["audio_start"][i],
+                batch["audio_end"][i],
             )
             for i in range(len(batch["signal"]))
         ]

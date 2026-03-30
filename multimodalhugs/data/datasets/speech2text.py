@@ -109,6 +109,8 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
             "signal": str, # path to the wav
             "signal_start": Optional[int],
             "signal_end": Optional[int],
+            "audio_start": Optional[int],
+            "audio_end": Optional[int],
             "encoder_prompt": Optional[str],
             "decoder_prompt": Optional[str],
             "output": Optional[str], # transcroption
@@ -246,6 +248,8 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
                 "signal": item["signal"],
                 "signal_start": item.get("signal_start", 0),
                 "signal_end": item.get("signal_end", 0),
+                "audio_start": item.get("audio_start", 0),
+                "audio_end": item.get("audio_end", 0),
                 "encoder_prompt": item.get("encoder_prompt", "") or "",
                 "decoder_prompt": item.get("decoder_prompt", "") or "",
                 "output": item.get("output", ""),
