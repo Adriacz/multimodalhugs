@@ -1,4 +1,5 @@
 import os
+import argparse
 from omegaconf import OmegaConf
 from typing import Optional
 
@@ -9,7 +10,8 @@ from .setup_utils import (
 )
 
 from multimodalhugs.data.datasets.multimodal_dataset import MultimodalDataset, MultimodalDatasetConfig
-from multimodalhugs.processors import MultimodalTranslationProcessor
+from multimodalhugs.processors import Video2TextTranslationProcessor, Speech2TextTranslationProcessor
+from multimodalhugs.data.datacollators.multimodal_datacollator import DataCollatorMultimodalVideoAudio
 
 def main(
     config_path: str,
@@ -66,10 +68,8 @@ def main(
         print("\nSetting Up Processor:\n")
         processor_cfg = getattr(cfg, "processor", None)
 
-        text_tokenizer_path  = getattr(processor_cfg, "text_tokenizer_path", None) if processor_cfg else None
-        new_vocabulary       = getattr(processor_cfg, "new_vocabulary", None) if processor_cfg else None
-
-        processor_output_dir = final_output_dir
+        text_tokenizer_path = getattr(processor_cfg, "text_tokenizer_path", None) if processor_cfg else None
+        new_vocabulary      = getattr(processor_cfg, "new_vocabulary", None) if processor_cfg else None
 
         # Load tokenizers (needed for both processor and model)
         tok, pre_tok, new = load_tokenizers(
@@ -77,13 +77,20 @@ def main(
             new_vocabulary,
         )
 
-        # Instantiate processor with modality-specific args
-        processor_kwargs = OmegaConf.to_container(processor_cfg, resolve=True) if processor_cfg else {}
-        proc = MultimodalTranslationProcessor(
-            tokenizer=tok,
-            **processor_kwargs
-        )
-        proc_path = save_processor(proc, processor_output_dir)
+        # Instantiate both processors with their modality-specific args from config
+        video_processor_cfg = getattr(processor_cfg, "video", None)
+        audio_processor_cfg = getattr(processor_cfg, "audio", None)
+
+        video_processor_kwargs = OmegaConf.to_container(video_processor_cfg, resolve=True) if video_processor_cfg else {}
+        audio_processor_kwargs = OmegaConf.to_container(audio_processor_cfg, resolve=True) if audio_processor_cfg else {}
+
+        video_proc = Video2TextTranslationProcessor(tokenizer=tok, **video_processor_kwargs)
+        audio_proc = Speech2TextTranslationProcessor(tokenizer=tok, **audio_processor_kwargs)
+
+        # Save each processor separately so they can be loaded independently at training time
+        video_proc_path = save_processor(video_proc, final_output_dir)
+        audio_proc_path = save_processor(audio_proc, final_output_dir)
+        proc_path = video_proc_path  # primary path reported to config updater
 
     # 3) Model setup
     model_path = None
@@ -99,6 +106,7 @@ def main(
                 getattr(processor_cfg, "new_vocabulary", None) if processor_cfg else None,
             )
 
+        # Convert OmegaConf to primitive dict for model constructor
         model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
         mtype = cfg.model.get("type")
         model_path = build_and_save_model(

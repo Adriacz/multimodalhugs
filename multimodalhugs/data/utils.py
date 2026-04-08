@@ -107,8 +107,8 @@ def sample_signal_exists(sample):
 def file_exists_filter(column_name, sample):
     return os.path.exists(sample[column_name])
 
-def duration_filter(sample, min_frames=None, max_frames=None):
-    dur = sample["DURATION"]
+def duration_filter(sample, min_frames=None, max_frames=None, duration_key="DURATION"):
+    dur = sample[duration_key]
 
     if min_frames is None and max_frames is None:
         return True

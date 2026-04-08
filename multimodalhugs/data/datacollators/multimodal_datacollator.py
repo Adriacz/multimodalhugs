@@ -1,9 +1,11 @@
 import torch
+import random
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union, Optional
 from transformers.utils import PaddingStrategy
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
 
 def create_seq2seq_labels_from_samples(
     samples: List[Dict[str, Union[str, List[int]]]],
@@ -140,7 +142,7 @@ class DataCollatorMultimodalSeq2Seq:
         self,
         processor: Any,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        model: Optional[Any] = None, # The model (optional, used to create decoder input IDs if needed)
+        model: Optional[Any] = None,  # The model (optional, used to create decoder input IDs if needed)
         padding: Union[bool, str, PaddingStrategy] = True,
         max_length: Optional[int] = None,
         pad_to_multiple_of: Optional[int] = None,
@@ -170,7 +172,6 @@ class DataCollatorMultimodalSeq2Seq:
         self.pad_to_multiple_of = pad_to_multiple_of
         self.label_pad_token_id = label_pad_token_id
         self.return_tensors = return_tensors
-
 
     def _obtain_labels_and_decoder_input_ids(
         self,
@@ -204,7 +205,6 @@ class DataCollatorMultimodalSeq2Seq:
             batch['decoder_input_ids'] = self.model.prepare_decoder_input_ids_from_labels(
                 labels=batch['labels']
             )
-
         return batch
 
     def __call__(
@@ -227,4 +227,245 @@ class DataCollatorMultimodalSeq2Seq:
             batch_dict=text_batch,
             return_tensors=self.return_tensors,
         )
+        return full_batch
+
+
+# Modality constants
+MODALITY_VIDEO = "video"
+MODALITY_AUDIO = "audio"
+MODALITY_BOTH  = "both"
+
+
+@dataclass
+class DataCollatorMultimodalVideoAudio(DataCollatorMultimodalSeq2Seq):
+    """
+    Data collator for multimodal sequence-to-sequence tasks with video and audio inputs.
+
+    Extends DataCollatorMultimodalSeq2Seq to handle two input modalities simultaneously.
+    For each sample in the batch, the collator randomly assigns a modality (video or audio),
+    or uses both. The inactive modality for each sample is represented as an all-zeros tensor
+    with an all-zeros mask, so the model always receives tensors of consistent shape.
+
+    The randomness is fully contained here. The model and processors are unaware of the
+    assignment — they only see tensors and masks.
+
+    Args:
+        video_processor (Any): Processor for the video modality. Must implement
+            _video_file_to_tensor(path, signal_start, signal_end).
+        audio_processor (Any): Processor for the audio modality. Must implement
+            _audio_to_tensor(path, audio_start, audio_end).
+        tokenizer (PreTrainedTokenizerBase): Tokenizer used to tokenize and convert labels to IDs.
+        model (Optional[Any], optional): The model used to optionally prepare decoder input IDs
+            from labels. Defaults to None.
+        modality_sampling (str, optional): Controls which modalities are active per sample.
+            - 'random': each sample gets video OR audio, chosen independently at random.
+            - 'video':  all samples use video only.
+            - 'audio':  all samples use audio only.
+            - 'both':   all samples use both modalities simultaneously.
+            Defaults to 'random'.
+        video_prob (float, optional): Probability of assigning video when
+            modality_sampling='random'. Defaults to 0.5.
+        padding (Union[bool, str, PaddingStrategy], optional): Padding strategy for labels.
+            Defaults to True.
+        max_length (Optional[int], optional): If set, truncates/pads label sequences to this length.
+            Defaults to None.
+        pad_to_multiple_of (Optional[int], optional): If set, pad sequences to a multiple of this value.
+            Defaults to None.
+        label_pad_token_id (int, optional): Token ID used to pad the labels. Defaults to -100.
+        return_tensors (str, optional): The format in which to return the batch ('pt', 'tf', or 'np').
+            Defaults to 'pt'.
+    """
+    video_processor: Any = None
+    audio_processor: Any = None
+    modality_sampling: str = "random"
+    video_prob: float = 0.5
+
+    def __init__(
+        self,
+        video_processor: Any,
+        audio_processor: Any,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        model: Optional[Any] = None,  # The model (optional, used to create decoder input IDs if needed)
+        modality_sampling: str = "random",
+        video_prob: float = 0.5,
+        padding: Union[bool, str, PaddingStrategy] = True,
+        max_length: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+        label_pad_token_id: int = -100,
+        return_tensors: str = "pt",
+    ):
+        # We pass video_processor as the generic 'processor' to the parent,
+        # but __call__ is fully overridden so it is not used for signal processing.
+        super().__init__(
+            processor=video_processor,
+            tokenizer=tokenizer if tokenizer is not None else video_processor.tokenizer,
+            model=model,
+            padding=padding,
+            max_length=max_length,
+            pad_to_multiple_of=pad_to_multiple_of,
+            label_pad_token_id=label_pad_token_id,
+            return_tensors=return_tensors,
+        )
+        self.video_processor = video_processor
+        self.audio_processor = audio_processor
+        self.modality_sampling = modality_sampling
+        self.video_prob = video_prob
+
+    def _assign_modalities(self, n: int) -> List[str]:
+        """
+        Returns a list of length n with a modality label per sample.
+
+        Args:
+            n: Number of samples in the batch.
+
+        Returns:
+            List of modality strings, one per sample. Each value is one of
+            MODALITY_VIDEO, MODALITY_AUDIO, or MODALITY_BOTH.
+        """
+        if self.modality_sampling == MODALITY_VIDEO:
+            return [MODALITY_VIDEO] * n
+        if self.modality_sampling == MODALITY_AUDIO:
+            return [MODALITY_AUDIO] * n
+        if self.modality_sampling == MODALITY_BOTH:
+            return [MODALITY_BOTH] * n
+        # 'random': each sample independently gets video or audio
+        return [
+            MODALITY_VIDEO if random.random() < self.video_prob else MODALITY_AUDIO
+            for _ in range(n)
+        ]
+
+    def _get_video_tensor(self, sample: Dict) -> torch.Tensor:
+        """
+        Extracts a video tensor [T, C, H, W] for a single sample.
+
+        Args:
+            sample: Dict containing 'signal', 'signal_start', 'signal_end'.
+
+        Returns:
+            Video tensor of shape [T, C, H, W] (or [T, *] depending on processor).
+        """
+        return self.video_processor._video_file_to_tensor(
+            sample["signal"],
+            sample.get("signal_start", 0.0),
+            sample.get("signal_end",   0.0),
+        )
+
+    def _get_audio_tensor(self, sample: Dict) -> torch.Tensor:
+        """
+        Extracts an audio tensor [T, n_mels] for a single sample.
+
+        The audio processor natively produces [n_mels, T], so we transpose
+        here to make the temporal dimension consistent (dim 0) with the video
+        tensor and with pad_and_create_mask expectations.
+
+        Args:
+            sample: Dict containing 'signal', 'audio_start', 'audio_end'.
+
+        Returns:
+            Audio tensor of shape [n_mels, T].
+        """
+        mel = self.audio_processor._audio_to_tensor(
+            sample["signal"],
+            sample.get("audio_start", 0.0),
+            sample.get("audio_end",   0.0),
+        )
+        return mel # [n_mels, T]
+
+    def _build_modality_tensors(
+        self,
+        samples: List[Dict],
+        modalities: List[str],
+    ):
+        """
+        Builds padded tensors and masks for both modalities across the batch.
+
+        For each sample, video and/or audio tensors are extracted according to
+        the assigned modality. Samples whose modality is inactive receive an
+        all-zeros tensor and an all-zeros mask.
+
+        Args:
+            samples: List of sample dicts.
+            modalities: List of modality labels, one per sample.
+
+        Returns:
+            input_frames        Tensor [B, T_v, ...]    padded video frames
+            frames_padding_mask Tensor [B, T_v]          1=real frame, 0=padding
+            input_audio         Tensor [B, n_mels , T_a]  padded audio frames
+            audio_padding_mask  Tensor [B, T_a]          1=real frame, 0=padding
+        """
+        video_tensors = []
+        audio_tensors = []
+
+        for sample, modality in zip(samples, modalities):
+            use_video = modality in (MODALITY_VIDEO, MODALITY_BOTH)
+            use_audio = modality in (MODALITY_AUDIO, MODALITY_BOTH)
+            video_tensors.append(self._get_video_tensor(sample) if use_video else None)
+            audio_tensors.append(self._get_audio_tensor(sample) if use_audio else None)
+
+        # Determine reference shapes and max lengths for padding
+        ref_video_shape = next(t.shape[1:] for t in video_tensors if t is not None)
+        ref_n_mels = next(t.shape[0] for t in audio_tensors if t is not None)
+        max_T_v = max(t.shape[0] if t is not None else 0 for t in video_tensors)
+        max_T_a = max(t.shape[1] if t is not None else 0 for t in audio_tensors)
+
+        B = len(samples)
+
+        # Allocate output tensors (zeros serve as padding for inactive modalities)
+        input_frames        = torch.zeros((B, max_T_v) + ref_video_shape)
+        frames_padding_mask = torch.zeros((B, max_T_v), dtype=torch.long)
+        input_audio = torch.zeros((B, ref_n_mels, max_T_a))
+        audio_padding_mask  = torch.zeros((B, max_T_a), dtype=torch.long)
+
+        for i, (vt, at) in enumerate(zip(video_tensors, audio_tensors)):
+            if vt is not None:
+                T_v = vt.shape[0]
+                input_frames[i, :T_v]        = vt
+                frames_padding_mask[i, :T_v] = 1
+            if at is not None:
+                T_a = at.shape[1]
+                input_audio[i, :, :T_a]   = at
+                audio_padding_mask[i, :T_a] = 1
+
+        return input_frames, frames_padding_mask, input_audio, audio_padding_mask
+
+    def __call__(
+        self,
+        samples: List[Dict[str, Union[List[int], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Collate a batch of multimodal samples for model input.
+
+        Args:
+            samples: Each item contains multimodal data and text fields.
+
+        Returns:
+            A dict ready for model.forward(), including inputs and labels.
+        """
+        # Assign a modality to each sample in the batch
+        modalities = self._assign_modalities(len(samples))
+
+        # Build video and audio tensors with their respective masks
+        input_frames, frames_padding_mask, input_audio, audio_padding_mask = \
+            self._build_modality_tensors(samples, modalities)
+
+        # Process text side: tokenization, padding, decoder inputs
+        text_batch = self._obtain_labels_and_decoder_input_ids(samples)
+
+        # Process encoder prompt if present
+        # (both processors share the same tokenizer so either works)
+        if any(s.get("encoder_prompt") for s in samples):
+            padded_prompts, prompt_mask = self.video_processor.process_prompts(
+                [s.get("encoder_prompt", "") for s in samples]
+            )
+            text_batch["encoder_prompt"] = padded_prompts
+            text_batch["encoder_prompt_length_padding_mask"] = prompt_mask
+
+        full_batch = {
+            "input_frames":        input_frames,
+            "frames_padding_mask": frames_padding_mask,
+            "input_audio":         input_audio,
+            "audio_padding_mask":  audio_padding_mask,
+            **text_batch,
+        }
+
         return full_batch
