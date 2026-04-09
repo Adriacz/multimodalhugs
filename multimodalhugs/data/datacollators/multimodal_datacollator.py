@@ -403,10 +403,17 @@ class DataCollatorMultimodalVideoAudio(DataCollatorMultimodalSeq2Seq):
             audio_tensors.append(self._get_audio_tensor(sample) if use_audio else None)
 
         # Determine reference shapes and max lengths for padding
-        ref_video_shape = next(t.shape[1:] for t in video_tensors if t is not None)
-        ref_n_mels = next(t.shape[0] for t in audio_tensors if t is not None)
+        # Use defaults when all tensors of a modality are None (entire batch is the other modality)
+        _ref_video = next((t for t in video_tensors if t is not None), None)
+        _ref_audio = next((t for t in audio_tensors if t is not None), None)
+        ref_video_shape = _ref_video.shape[1:] if _ref_video is not None else (3, 224, 224)
+        ref_n_mels = _ref_audio.shape[0] if _ref_audio is not None else 80
         max_T_v = max(t.shape[0] if t is not None else 0 for t in video_tensors)
         max_T_a = max(t.shape[1] if t is not None else 0 for t in audio_tensors)
+
+        # If all tensors of a modality are None, use size 1 to avoid zero-dim tensors
+        max_T_v = max_T_v if max_T_v > 0 else 1
+        max_T_a = max_T_a if max_T_a > 0 else 1
 
         B = len(samples)
 

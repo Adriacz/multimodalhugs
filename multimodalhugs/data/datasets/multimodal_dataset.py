@@ -1,7 +1,5 @@
-import torch
+import av
 import datasets
-import torchaudio
-from pathlib import Path
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 from datasets import DatasetInfo, SplitGenerator
@@ -26,7 +24,7 @@ class MultimodalDatasetConfig(MultimodalDataConfig):
     Configuration for the Multimodal (video + audio) dataset.
 
     Each sample is a single .mp4 file that contains both the video stream
-    (sign language interpreter) and the audio stream (speaker).
+    (sign language interpreter) and the audio stream (parliament speaker).
     Temporal boundaries for each modality are stored separately:
         - signal_start / signal_end : signing interval (ms)
         - audio_start  / audio_end  : speech interval  (ms)
@@ -62,7 +60,6 @@ class MultimodalDatasetConfig(MultimodalDataConfig):
         data_cfg = gather_appropriate_data_cfg(cfg)
         valid_config, extra_args, cfg_for_super = build_merged_omegaconf_config(type(self), data_cfg, **kwargs)
         super().__init__(cfg=cfg_for_super, **extra_args)
-        # pull from OmegaConf yaml (or leave defaults)
         self.max_frames = valid_config.get("max_frames", self.max_frames)
         self.min_frames = valid_config.get("min_frames", self.min_frames)
         self.max_audio_duration = valid_config.get("max_audio_duration", self.max_audio_duration)
@@ -156,21 +153,30 @@ class MultimodalDataset(datasets.GeneratorBasedBuilder):
             """
             Computes AUDIO_DURATION (seconds) and VIDEO_FRAMES (frame count)
             for filtering. Does not load the actual pixel/waveform data.
+            Uses PyAV for both modalities to avoid CUDA dependency at dataset
+            preparation time.
             """
             signal_path = sample["signal"]
 
-            # --- Audio duration (from the .mp4 audio stream via torchaudio) ---
-            a_start_ms = sample.get("audio_start", 0) or 0
-            a_end_ms   = sample.get("audio_end",   0) or 0
+            # --- Audio duration (from the .mp4 audio stream via PyAV) ---
+            a_start_ms  = sample.get("audio_start", 0) or 0
+            a_end_ms    = sample.get("audio_end",   0) or 0
             a_start_sec = a_start_ms / 1000.0
             a_end_sec   = a_end_ms   / 1000.0 if a_end_ms > 0 else None
 
             try:
-                info = torchaudio.info(str(signal_path))
-                sr = info.sample_rate
-                total_sec = info.num_frames / sr
+                container = av.open(str(signal_path))
+                audio_streams = container.streams.audio
+                if not audio_streams:
+                    sample["_invalid"] = True
+                    sample["AUDIO_DURATION"] = 0.0
+                    sample["VIDEO_FRAMES"] = 0
+                    return sample
+                audio_stream = audio_streams[0]
+                total_sec = float(audio_stream.duration * audio_stream.time_base) if audio_stream.duration else 0.0
                 clip_end = min(a_end_sec, total_sec) if a_end_sec is not None else total_sec
                 audio_duration = clip_end - a_start_sec
+                container.close()
                 if audio_duration <= 0:
                     sample["_invalid"] = True
                     sample["AUDIO_DURATION"] = 0.0
@@ -182,10 +188,9 @@ class MultimodalDataset(datasets.GeneratorBasedBuilder):
                 sample["VIDEO_FRAMES"] = 0
                 return sample
 
-            # --- Video frame count (from the .mp4 video stream via av) ---
-            import av
-            v_start_ms = sample.get("signal_start", 0) or 0
-            v_end_ms   = sample.get("signal_end",   0) or 0
+            # --- Video frame count (from the .mp4 video stream via PyAV) ---
+            v_start_ms  = sample.get("signal_start", 0) or 0
+            v_end_ms    = sample.get("signal_end",   0) or 0
             v_start_sec = v_start_ms / 1000.0
             v_end_sec   = v_end_ms   / 1000.0 if v_end_ms > 0 else None
 

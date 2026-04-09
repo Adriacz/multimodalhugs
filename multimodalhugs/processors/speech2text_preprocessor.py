@@ -118,45 +118,69 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
       
     def _load_waveform(self, audio_path: Union[str, Path], start_sec: float, end_sec: Optional[float]) -> torch.Tensor:
         """
-        Loads a slice of a .wav file as a waveform tensor [1, T] at
-        TARGET_SAMPLE_RATE. Resamples if the file's native rate differs.
+        Loads a slice of an audio/video file as a waveform tensor [1, T] at
+        TARGET_SAMPLE_RATE. Uses PyAV for .mp4 files, torchaudio otherwise.
+        Resamples if the file's native rate differs.
 
         Args:
-            audio_path: Path to the .wav file.
+            audio_path: Path to the audio or video file.
             start_sec: Start of the clip in seconds.
             end_sec: End of the clip in seconds, or None to read until EOF.
 
         Returns:
             Waveform tensor of shape [1, T] (mono, float32, 16 kHz).
         """
+        import av
+        import numpy as np
 
-        info = torchaudio.info(str(audio_path))
-        native_sr = info.sample_rate
+        audio_path = str(audio_path)
 
-        # Convert seconds → sample indices for torchaudio.load()
-        frame_offset = int(start_sec * native_sr)
-        if end_sec is not None:
-            num_frames = int((end_sec - start_sec) * native_sr)
+        # Use PyAV for mp4/video files — torchaudio/soundfile does not support mp4
+        if audio_path.endswith('.mp4') or audio_path.endswith('.mkv') or audio_path.endswith('.avi'):
+            container = av.open(audio_path)
+            audio_stream = container.streams.audio[0]
+            native_sr = audio_stream.sample_rate
+
+            frames = []
+            for frame in container.decode(audio=0):
+                ts = float(frame.pts * audio_stream.time_base)
+                if ts < start_sec:
+                    continue
+                if end_sec is not None and ts > end_sec:
+                    break
+                frames.append(frame.to_ndarray())  # [C, T_frame]
+            container.close()
+
+            if not frames:
+                return torch.zeros(1, 1)
+
+            # Concatenate along time axis: [C, T]
+            waveform = np.concatenate(frames, axis=-1)
+            waveform = torch.from_numpy(waveform).float()
+            if waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0)
         else:
-            num_frames = -1  # -1 = read until end of file
-
-        waveform, sr = torchaudio.load(
-            str(audio_path),
-            frame_offset=frame_offset,
-            num_frames=num_frames,
-        )
+            # torchaudio path for wav/flac/etc. — unchanged from original
+            info = torchaudio.info(audio_path)
+            native_sr = info.sample_rate
+            frame_offset = int(start_sec * native_sr)
+            num_frames = int((end_sec - start_sec) * native_sr) if end_sec is not None else -1
+            waveform, native_sr = torchaudio.load(
+                audio_path,
+                frame_offset=frame_offset,
+                num_frames=num_frames,
+            )
 
         # Mix down to mono if needed: [C, T] → [1, T]
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
         # Resample to TARGET_SAMPLE_RATE if necessary
-        if sr != self.TARGET_SAMPLE_RATE:
-            resampler = T.Resample(orig_freq=sr, new_freq=self.TARGET_SAMPLE_RATE)
+        if native_sr != self.TARGET_SAMPLE_RATE:
+            resampler = T.Resample(orig_freq=native_sr, new_freq=self.TARGET_SAMPLE_RATE)
             waveform = resampler(waveform)
 
         return waveform.to(torch.float32)  # [1, T]
-
 
     def _audio_to_tensor(self, audio_input: Union[str, Path, np.ndarray, torch.Tensor], signal_start: float = 0.0, signal_end: float = 0.0) -> torch.Tensor:
         """

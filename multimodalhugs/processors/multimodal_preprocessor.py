@@ -1,7 +1,12 @@
 # Standard library
 import logging
 import os
+import json
 from typing import Any, Optional
+
+# Third-party libraries
+from transformers import AutoTokenizer
+from transformers.feature_extraction_utils import BatchFeature
 
 # Local application imports
 from multimodalhugs.processors.multimodal_sequence2sequence_processor import MultimodalSequence2SequenceProcessor
@@ -41,27 +46,21 @@ class MultimodalVideoAudioProcessor(MultimodalSequence2SequenceProcessor):
 
     def __init__(
         self,
+        tokenizer: Optional[Any] = None,
         video_processor: Optional[Video2TextTranslationProcessor] = None,
         audio_processor: Optional[Speech2TextTranslationProcessor] = None,
-        tokenizer: Optional[Any] = None,
         **kwargs,
     ):
         """
         Initializes the MultimodalVideoAudioProcessor.
 
         Args:
+            tokenizer (Optional[Any]): Shared tokenizer for both modalities.
             video_processor (Optional[Video2TextTranslationProcessor]): Processor for the video modality.
             audio_processor (Optional[Speech2TextTranslationProcessor]): Processor for the audio modality.
-            tokenizer (Optional[Any]): Shared tokenizer for both modalities.
-                If None, defaults to `video_processor.tokenizer`.
             **kwargs: Additional keyword arguments passed to the parent class.
         """
-        # Use the shared tokenizer from video_processor if not provided
-        if tokenizer is None and video_processor is not None:
-            tokenizer = video_processor.tokenizer
-
         super().__init__(tokenizer=tokenizer, **kwargs)
-
         self.video_processor = video_processor
         self.audio_processor = audio_processor
 
@@ -94,18 +93,22 @@ class MultimodalVideoAudioProcessor(MultimodalSequence2SequenceProcessor):
         """
         Loads the wrapper processor and its two sub-processors from disk.
 
-        Expects `video_processor/` and `audio_processor/` subdirectories
-        inside `pretrained_model_name_or_path`.
+        Loads the tokenizer from `pretrained_model_name_or_path` directly,
+        bypassing HuggingFace's from_args_and_dict which requires tokenizer
+        to be passed via __init__. Then loads sub-processors from subdirectories.
 
         Args:
             pretrained_model_name_or_path (str): Path to the saved processor directory.
-            **kwargs: Forwarded to the parent `from_pretrained`.
+            **kwargs: Forwarded to AutoTokenizer.from_pretrained.
 
         Returns:
             MultimodalVideoAudioProcessor: The loaded processor.
         """
-        # Load tokenizer via parent
-        instance = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        # Load tokenizer directly
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+        # Instantiate wrapper with tokenizer
+        instance = cls(tokenizer=tokenizer)
 
         # Load sub-processors from subdirectories
         video_dir = os.path.join(pretrained_model_name_or_path, cls.VIDEO_PROCESSOR_DIR)
