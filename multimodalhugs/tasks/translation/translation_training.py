@@ -17,6 +17,7 @@ from transformers import (
 )
 
 from multimodalhugs.processors import (
+    MultimodalVideoAudioProcessor,
     SignwritingProcessor,
     Pose2TextTranslationProcessor,
     Video2TextTranslationProcessor,
@@ -48,6 +49,9 @@ Text2TextTranslationProcessor.register_for_auto_class()
 AutoProcessor.register("text2text_translation_processor", Text2TextTranslationProcessor)
 
 Speech2TextTranslationProcessor.register_for_auto_class()
+
+MultimodalVideoAudioProcessor.register_for_auto_class()
+AutoProcessor.register("multimodal_video_audio_processor", MultimodalVideoAudioProcessor)
 AutoProcessor.register("speech2text_processor", Speech2TextTranslationProcessor)
 
 
@@ -65,7 +69,7 @@ import transformers
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import send_example_telemetry
 
-from multimodalhugs.data import DataCollatorMultimodalSeq2Seq
+from multimodalhugs.data import DataCollatorMultimodalSeq2Seq, DataCollatorMultimodalVideoAudio
 from multimodalhugs.utils import print_module_details
 
 from multimodalhugs.tasks.translation.config_classes import GenerateArguments, ModelArguments, ProcessorArguments, DataTrainingArguments, ExtraArguments, ExtendedSeq2SeqTrainingArguments
@@ -270,8 +274,18 @@ def main():
 
     # Data collator
     label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
-
-    if processor is not None:
+        
+    if isinstance(processor, MultimodalVideoAudioProcessor):
+        # Multimodal mode: use dedicated collator with both processors
+        data_collator = DataCollatorMultimodalVideoAudio(
+            video_processor=processor.video_processor,
+            audio_processor=processor.audio_processor,
+            tokenizer=tokenizer,
+            model=model,
+            pad_to_multiple_of=8 if training_args.fp16 else None,
+            label_pad_token_id=label_pad_token_id,
+        )
+    elif processor is not None:
         data_collator = DataCollatorMultimodalSeq2Seq(
             processor=processor,
             tokenizer=tokenizer,

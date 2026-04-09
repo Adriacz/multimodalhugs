@@ -11,7 +11,8 @@ from .setup_utils import (
 
 from multimodalhugs.data.datasets.multimodal_dataset import MultimodalDataset, MultimodalDatasetConfig
 from multimodalhugs.processors import Video2TextTranslationProcessor, Speech2TextTranslationProcessor
-from multimodalhugs.data.datacollators.multimodal_datacollator import DataCollatorMultimodalVideoAudio
+from multimodalhugs.processors.multimodal_preprocessor import MultimodalVideoAudioProcessor
+
 
 def main(
     config_path: str,
@@ -77,7 +78,7 @@ def main(
             new_vocabulary,
         )
 
-        # Instantiate both processors with their modality-specific args from config
+        # Instantiate both sub-processors with their modality-specific args from config
         video_processor_cfg = getattr(processor_cfg, "video", None)
         audio_processor_cfg = getattr(processor_cfg, "audio", None)
 
@@ -87,10 +88,13 @@ def main(
         video_proc = Video2TextTranslationProcessor(tokenizer=tok, **video_processor_kwargs)
         audio_proc = Speech2TextTranslationProcessor(tokenizer=tok, **audio_processor_kwargs)
 
-        # Save each processor separately so they can be loaded independently at training time
-        video_proc_path = save_processor(video_proc, final_output_dir)
-        audio_proc_path = save_processor(audio_proc, final_output_dir)
-        proc_path = video_proc_path  # primary path reported to config updater
+        # Wrap both processors in the multimodal wrapper and save as a single processor
+        proc = MultimodalVideoAudioProcessor(
+            video_processor=video_proc,
+            audio_processor=audio_proc,
+            tokenizer=tok,
+        )
+        proc_path = save_processor(proc, final_output_dir)
 
     # 3) Model setup
     model_path = None
