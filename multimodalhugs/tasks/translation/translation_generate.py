@@ -32,7 +32,8 @@ from multimodalhugs.processors import (
     Image2TextTranslationProcessor,
     Text2TextTranslationProcessor,
     Features2TextTranslationProcessor,
-    Speech2TextTranslationProcessor
+    Speech2TextTranslationProcessor,
+    MultimodalVideoAudioProcessor
 )
 
 import multimodalhugs.models
@@ -56,6 +57,8 @@ AutoProcessor.register("text2text_translation_processor", Text2TextTranslationPr
 Speech2TextTranslationProcessor.register_for_auto_class()
 AutoProcessor.register("speech2text_processor", Speech2TextTranslationProcessor)
 
+MultimodalVideoAudioProcessor.register_for_auto_class()
+AutoProcessor.register("multimodal_video_audio_processor", MultimodalVideoAudioProcessor)
 
 import logging
 import os
@@ -71,7 +74,7 @@ import transformers
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import send_example_telemetry
 
-from multimodalhugs.data import DataCollatorMultimodalSeq2Seq
+from multimodalhugs.data import DataCollatorMultimodalSeq2Seq, DataCollatorMultimodalVideoAudio
 from multimodalhugs.utils import print_module_details
 
 from multimodalhugs.tasks.translation.config_classes import ModelArguments, ProcessorArguments, DataTrainingArguments, ExtraArguments, ExtendedSeq2SeqTrainingArguments, GenerateArguments
@@ -254,7 +257,18 @@ def main():
     # --- Configure the data collator ---
     # Responsible for grouping and preparing data for evaluation; internally manages language aspects.
     label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
-    if processor is not None:
+    
+    if isinstance(processor, MultimodalVideoAudioProcessor):
+    data_collator = DataCollatorMultimodalVideoAudio(
+        video_processor=processor.video_processor,
+        audio_processor=processor.audio_processor,
+        tokenizer=tokenizer,
+        model=model,
+        pad_to_multiple_of=8 if training_args.fp16 else None,
+        label_pad_token_id=label_pad_token_id,
+        modality_sampling=generate_args.modality_sampling,
+    )
+    elif processor is not None:
         data_collator = DataCollatorMultimodalSeq2Seq(
             processor=processor,
             tokenizer=tokenizer,

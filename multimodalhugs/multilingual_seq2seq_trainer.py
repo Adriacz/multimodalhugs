@@ -160,7 +160,12 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
                 k: v for k, v in inputs.items() if k not in ("decoder_input_ids", "decoder_attention_mask")
             }
 
-        if all_values_equal(generation_inputs['decoder_attention_mask']):
+        if 'decoder_attention_mask' not in generation_inputs or generation_inputs['decoder_attention_mask'] is None:
+            generation_inputs.pop('decoder_input_ids', None)
+            generation_inputs.pop('decoder_attention_mask', None)
+            generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
+
+        elif all_values_equal(generation_inputs['decoder_attention_mask']):
             # If all decoder_prompts have the same number of tokens, we can pass the whole batch in the model.generate()
             generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
 

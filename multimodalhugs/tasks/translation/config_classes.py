@@ -135,7 +135,16 @@ class GenerateArguments:
             )
         },
     )
-
+    modality_sampling: str = field(
+    default="random",
+    metadata={
+        "help": (
+            "Controls which modalities are active during multimodal inference. "
+            "Options: 'random', 'video', 'audio', 'both'. "
+            "Only used with MultimodalVideoAudioProcessor."
+            )
+        },
+    )
 @dataclass
 class ExtendedSeq2SeqTrainingArguments(Seq2SeqTrainingArguments):
     metric_name: Optional[str] = field(
