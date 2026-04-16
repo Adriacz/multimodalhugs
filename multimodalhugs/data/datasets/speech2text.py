@@ -3,6 +3,7 @@
 import os
 import torch
 import datasets
+import soundfile as sf
 from pathlib import Path
 from omegaconf import ListConfig
 from typing import Any, Union, Optional, Dict, Tuple
@@ -107,8 +108,6 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
     def _info(self):
         features = {
             "signal": str, # path to the wav
-            "signal_start": Optional[int],
-            "signal_end": Optional[int],
             "audio_start": Optional[int],
             "audio_end": Optional[int],
             "encoder_prompt": Optional[str],
@@ -172,8 +171,8 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
             audio_path = sample["signal"]
 
             # Convert millisecond timestamps to seconds
-            start_ms = sample.get("signal_start", 0) or 0
-            end_ms   = sample.get("signal_end",   0) or 0
+            start_ms = sample.get("audio_start", 0) or 0
+            end_ms   = sample.get("audio_end",   0) or 0
             start_sec = start_ms / 1000.0
             end_sec   = end_ms   / 1000.0 if end_ms > 0 else None
 
@@ -246,8 +245,6 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
         for idx, item in enumerate(dataset):
             yield idx, {
                 "signal": item["signal"],
-                "signal_start": item.get("signal_start", 0),
-                "signal_end": item.get("signal_end", 0),
                 "audio_start": item.get("audio_start", 0),
                 "audio_end": item.get("audio_end", 0),
                 "encoder_prompt": item.get("encoder_prompt", "") or "",

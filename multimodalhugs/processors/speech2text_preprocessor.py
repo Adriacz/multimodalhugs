@@ -158,15 +158,15 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
         return waveform.to(torch.float32)  # [1, T]
 
 
-    def _audio_to_tensor(self, audio_input: Union[str, Path, np.ndarray, torch.Tensor], signal_start: float = 0.0, signal_end: float = 0.0) -> torch.Tensor:
+    def _audio_to_tensor(self, audio_input: Union[str, Path, np.ndarray, torch.Tensor], audio_start: float = 0.0, audio_end: float = 0.0) -> torch.Tensor:
         """
         Converts an audio input to a Mel-spectrogram tensor [n_mels, T].
 
         Args:
             audio_input: Path to a .wav file, a numpy array [T] or [C, T],
                 or a pre-computed torch.Tensor.
-            signal_start: Start of the clip in milliseconds.
-            signal_end: End of the clip in milliseconds (0 = until EOF).
+            audio_start: Start of the clip in milliseconds.
+            audio_end: End of the clip in milliseconds (0 = until EOF).
 
         Returns:
             Mel-spectrogram tensor of shape [n_mels, T_frames].
@@ -185,8 +185,8 @@ class Speech2TextTranslationProcessor(MultimodalSequence2SequenceProcessor):
             return mel
 
         # File path: parse timestamps and load 
-        start_sec = (signal_start or 0.0) / 1000.0
-        end_sec   = (signal_end / 1000.0) if signal_end else None
+        start_sec = (audio_start or 0.0) / 1000.0
+        end_sec   = (audio_end / 1000.0) if audio_end else None
 
         # Branch A: delegate entirely to a HuggingFace AutoProcessor
         if self.custom_preprocessor is not None:
