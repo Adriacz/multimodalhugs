@@ -259,15 +259,15 @@ def main():
     label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
     
     if isinstance(processor, MultimodalVideoAudioProcessor):
-    data_collator = DataCollatorMultimodalVideoAudio(
-        video_processor=processor.video_processor,
-        audio_processor=processor.audio_processor,
-        tokenizer=tokenizer,
-        model=model,
-        pad_to_multiple_of=8 if training_args.fp16 else None,
-        label_pad_token_id=label_pad_token_id,
-        modality_sampling=generate_args.modality_sampling,
-    )
+        data_collator = DataCollatorMultimodalVideoAudio(
+            video_processor=processor.video_processor,
+            audio_processor=processor.audio_processor,
+            tokenizer=tokenizer,
+            model=model,
+            pad_to_multiple_of=8 if training_args.fp16 else None,
+            label_pad_token_id=label_pad_token_id,
+            modality_sampling=generate_args.modality_sampling,
+        )
     elif processor is not None:
         data_collator = DataCollatorMultimodalSeq2Seq(
             processor=processor,
