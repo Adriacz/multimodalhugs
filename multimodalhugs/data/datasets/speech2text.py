@@ -73,11 +73,11 @@ class Speech2TextDataset(datasets.GeneratorBasedBuilder):
     **Speech2TextDataset: A dataset class for Speech-to-Text tasks.**
 
     Reads .wav audio files referenced in a TSV metadata file and filters
-    them by duration (in seconds). The TSV is expected to have the same
-    structure as Video2TextDataset:
-        signal, signal_start, signal_end, encoder_prompt, decoder_prompt, output
+    them by duration (in seconds). The TSV is expected to have a similar 
+    structure as Video2TextDataset, with:
+        signal, audio_start, audio_end, encoder_prompt, decoder_prompt, output
 
-    Where signal_start and signal_end are in milliseconds.
+    Where audio_start and audio_end are in milliseconds.
     """
     def __init__(
         self, 
