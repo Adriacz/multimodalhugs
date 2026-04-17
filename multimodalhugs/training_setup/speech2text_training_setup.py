@@ -9,6 +9,7 @@ from .setup_utils import (
     resolve_setup_paths, resolve_update_choice, print_artifact_summary
 )
 
+import multimodalhugs.models
 from multimodalhugs.data.datasets.speech2text import Speech2TextDataset, Speech2TextDataConfig
 from multimodalhugs.processors import Speech2TextTranslationProcessor
 

@@ -573,6 +573,13 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
                 input_ids = None
 
+            # Fallback: If we have embeds but no mask, we assume no padding
+            if attention_mask is None and inputs_embeds is not None:
+                attention_mask = torch.ones(
+                    inputs_embeds.shape[:2],
+                    dtype=torch.long, device=inputs_embeds.device,
+                )
+
             inputs_embeds, attention_mask = merge_modalities(
                 x=inputs_embeds, 
                 padding_mask=attention_mask, 
@@ -686,6 +693,13 @@ class MultiModalEmbedderModel(PreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
             input_ids = None
+        
+        # Fallback: If we have embeds but no mask, we assume no padding
+        if attention_mask is None and inputs_embeds is not None:
+            attention_mask = torch.ones(
+                inputs_embeds.shape[:2],
+                dtype=torch.long, device=inputs_embeds.device,
+            )
 
         inputs_embeds, attention_mask = merge_modalities(
             x=inputs_embeds, 
