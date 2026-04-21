@@ -602,12 +602,18 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 pad_idx=self.pad_token_id, 
                 eos_idx=self.eos_token_id, 
             )
-            # Fix mask size for Whisper: encoder_outputs already has the correct size
-            if attention_mask is not None and self.audio_feature_extractor is not None:
-                if hasattr(self.config, 'audio_feature_extractor_type') and self.config.audio_feature_extractor_type == 'whisper':
-                    B = attention_mask.shape[0]
-                    T = encoder_outputs[0].shape[1]
-                    attention_mask = torch.ones((B, T), dtype=attention_mask.dtype, device=attention_mask.device)
+            
+            # Fix mask size for Whisper: encoder_outputs already has the correct size.
+            # Applies to unimodal speech2text (feature_extractor_type='whisper')
+            # and multimodal (audio_feature_extractor_type='whisper').
+            is_whisper_unimodal = (hasattr(self.config, 'feature_extractor_type') and
+                       self.config.feature_extractor_type == 'whisper')
+            is_whisper_multimodal = (hasattr(self.config, 'audio_feature_extractor_type') and
+                                     self.config.audio_feature_extractor_type == 'whisper')
+            if attention_mask is not None and (is_whisper_unimodal or is_whisper_multimodal):
+                B = attention_mask.shape[0]
+                T = encoder_outputs[0].shape[1]
+                attention_mask = torch.ones((B, T), dtype=attention_mask.dtype, device=attention_mask.device)
 
         outputs = self.backbone(
             input_ids=input_ids,
