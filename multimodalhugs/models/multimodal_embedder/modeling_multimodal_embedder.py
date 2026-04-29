@@ -245,39 +245,26 @@ class MultiModalEmbedderModel(PreTrainedModel):
             audio_embeds, audio_padding_mask = self.audio_multimodal_mapper(audio_embeds, audio_padding_mask)
 
         return audio_embeds, audio_padding_mask
-
+    
     def _fuse_modalities(self, video_embeds, video_mask, audio_embeds, audio_mask):
-        """
-        **Fuse video and audio embeddings by temporal concatenation.**
-
-        Both tensors are `(B, T, d_model)` at this point. The result is
-        `(B, T_v' + T_a', d_model)`. Samples where one modality is all-padding
-        contribute nothing — the attention mask ensures the encoder ignores them.
-
-        **Args:**
-        - `video_embeds` (Optional[torch.Tensor]): Shape `(B, T_v', d_model)`.
-        - `video_mask` (Optional[torch.Tensor]): Shape `(B, T_v')`.
-        - `audio_embeds` (Optional[torch.Tensor]): Shape `(B, T_a', d_model)`.
-        - `audio_mask` (Optional[torch.Tensor]): Shape `(B, T_a')`.
-
-        **Returns:**
-        - Tuple of (fused embeddings `(B, T_v'+T_a', d_model)`, fused mask `(B, T_v'+T_a')`).
-        """
-        if video_embeds is not None and audio_embeds is not None:
-            fused_embeds = torch.cat([video_embeds, audio_embeds], dim=1)
-            if video_mask is not None and audio_mask is not None:
-                fused_mask = torch.cat([video_mask, audio_mask], dim=1)
-            else:
-                fused_mask = None
-            return fused_embeds, fused_mask
-
-        if video_embeds is not None:
+        # Unimodal cases: no choice to make
+        if video_embeds is None and audio_embeds is None:
+            raise ValueError("Both video_embeds and audio_embeds are None — cannot fuse.")
+        if video_embeds is None:
+            return audio_embeds, audio_mask
+        if audio_embeds is None:
             return video_embeds, video_mask
 
-        if audio_embeds is not None:
-            return audio_embeds, audio_mask
-
-        raise ValueError("Both video_embeds and audio_embeds are None — cannot fuse.")
+        # Both modalities available: sample uniformly
+        # Training only, at inference we expect a single modality to be passed
+        if self.training:
+            if torch.rand(1).item() < 0.5:
+                return video_embeds, video_mask
+            else:
+                return audio_embeds, audio_mask
+        else:
+            # At eval/inference, default to video
+            return video_embeds, video_mask
 
     def get_input_embeddings(self):
         """

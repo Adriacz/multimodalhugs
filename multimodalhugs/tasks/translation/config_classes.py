@@ -136,7 +136,7 @@ class GenerateArguments:
         },
     )
     modality_sampling: str = field(
-    default="random",
+    default="both",
     metadata={
         "help": (
             "Controls which modalities are active during multimodal inference. "
