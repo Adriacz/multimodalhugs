@@ -207,8 +207,10 @@ class MultiModalEmbedderModel(PreTrainedModel):
         if self.feature_extractor is not None:
             video_embeds = self.feature_extractor(input_frames)
             if frames_padding_mask is not None:
-                B, T = video_embeds.shape[:2]
-                frames_padding_mask = torch.ones((B, T), dtype=frames_padding_mask.dtype, device=frames_padding_mask.device)
+                T_new = video_embeds.shape[1]
+                mask_f = frames_padding_mask.float().unsqueeze(1)
+                mask_f = torch.nn.functional.interpolate(mask_f, size=T_new, mode='nearest')
+                frames_padding_mask = mask_f.squeeze(1).to(frames_padding_mask.dtype)
         else:
             video_embeds = input_frames
 
@@ -236,8 +238,10 @@ class MultiModalEmbedderModel(PreTrainedModel):
             # Whisper encoder expects [B, n_mels, T] — matches collator output directly
             audio_embeds = self.audio_feature_extractor(input_audio)
             if audio_padding_mask is not None:
-                B, T = audio_embeds.shape[:2]
-                audio_padding_mask = torch.ones((B, T), dtype=audio_padding_mask.dtype, device=audio_padding_mask.device)
+                T_new = audio_embeds.shape[1]
+                mask_f = audio_padding_mask.float().unsqueeze(1)
+                mask_f = torch.nn.functional.interpolate(mask_f, size=T_new, mode='nearest')
+                audio_padding_mask = mask_f.squeeze(1).to(audio_padding_mask.dtype)
         else:
             audio_embeds = input_audio
 
