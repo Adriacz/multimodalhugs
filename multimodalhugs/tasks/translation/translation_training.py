@@ -310,6 +310,7 @@ def main():
         result = {}
         for metric, name in zip(metrics_list, metric_names):
             metric_result = metric.compute(predictions=decoded_preds, references=decoded_labels)
+
             for k, v in metric_result.items():
                 out_key = name if k == "score" else f"{name}_{k}"
                 if isinstance(v, (float, int)):

@@ -14,6 +14,7 @@ from transformers import (
     PreTrainedModel,
     PretrainedConfig,
     AutoConfig,
+    WhisperModel
 )
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from accelerate.utils import find_tied_parameters
@@ -468,6 +469,9 @@ class MultiModalEmbedderModel(PreTrainedModel):
                     inputs_embeds = input_frames
                 else:
                     inputs_embeds = self.feature_extractor(input_frames)
+                    if attention_mask is not None:
+                        B, T = inputs_embeds.shape[:2]
+                        attention_mask = torch.ones((B, T), dtype=attention_mask.dtype, device=attention_mask.device)
 
             if self.multimodal_mapper is not None and inputs_embeds is not None:
                 inputs_embeds, attention_mask = self.multimodal_mapper(inputs_embeds, attention_mask)
@@ -498,6 +502,14 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 pad_idx=self.pad_token_id, 
                 eos_idx=self.eos_token_id, 
             )
+        
+            # Fix mask size for Whisper: encoder outputs have different T than input
+            if attention_mask is not None and self.feature_extractor is not None:
+                if hasattr(self.config, 'feature_extractor_type') and self.config.feature_extractor_type == 'whisper':
+                    B = attention_mask.shape[0]
+                    T = encoder_outputs[0].shape[1]
+                    attention_mask = torch.ones((B, T), dtype=attention_mask.dtype, device=attention_mask.device)
+        
         outputs = self.backbone(
             input_ids = input_ids,
             attention_mask = attention_mask,
@@ -611,6 +623,9 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 inputs_embeds = input_frames
             else:
                 inputs_embeds = self.feature_extractor(input_frames)
+                if attention_mask is not None:
+                    B, T = inputs_embeds.shape[:2]
+                    attention_mask = torch.ones((B, T), dtype=attention_mask.dtype, device=attention_mask.device)
             
         if self.multimodal_mapper is not None and inputs_embeds is not None:
             inputs_embeds, attention_mask = self.multimodal_mapper(inputs_embeds, attention_mask)

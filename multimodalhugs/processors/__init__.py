@@ -13,6 +13,7 @@ from .text_modality_processor import TextModalityProcessor, TextRole
 from .features_modality_processor import FeaturesModalityProcessor
 from .image_modality_processor import ImageModalityProcessor
 from .signwriting_modality_processor import SignwritingModalityProcessor
+from .speech_modality_processor import SpeechModalityProcessor
 from .meta_processor import ProcessorSlot, MultimodalMetaProcessor
 from .utils import *
 

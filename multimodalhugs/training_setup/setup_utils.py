@@ -56,6 +56,16 @@ _PIPELINE_PRESETS: dict = {
             "signal_end": "signal_end",
         },
     },
+    "speech2text": {
+        "processor_class": "SpeechModalityProcessor",
+        "output_data_key": "input_frames",
+        "output_mask_key": "attention_mask",
+        "column_map": {
+            "signal": "signal",
+            "audio_start": "signal_start",
+            "audio_end": "signal_end",
+        },
+    },
     # TODO (issue #76): FeaturesModalityProcessor currently only supports one
     # .npy file per sample. signal_start / signal_end are intentionally absent
     # here because the processor has no dict-handling branch and no temporal

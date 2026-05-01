@@ -79,6 +79,10 @@ _DATASET_IMPORT_MAP: dict = {
         "multimodalhugs.data.datasets.bilingual_text2text",
         ("BilingualText2TextDataset", "BilingualText2textMTDataConfig"),
     ),
+    "speech2text": (
+        "multimodalhugs.data.datasets.speech2text",
+        ("Speech2TextDataset", "Speech2TextDataConfig"),
+    ),
 }
 
 
