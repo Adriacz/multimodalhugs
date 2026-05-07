@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, Tuple, Union
 
 # Third-Party Imports
 import torch
+import torch.nn.functional as F
 from transformers.models.auto.modeling_auto import MODEL_WITH_LM_HEAD_MAPPING_NAMES
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers import (
@@ -29,6 +30,54 @@ from multimodalhugs.models.multimodal_embedder.configuration_multimodal_embedder
 from multimodalhugs.models.utils import EncoderWrapper
 
 logger = logging.getLogger(__name__)
+
+
+def _sinkhorn_ot_loss(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 0.1,
+    n_iters: int = 20,
+) -> torch.Tensor:
+    """
+    Entropic-regularised OT cost between two sets of d-dimensional vectors.
+
+    Both sets are treated as discrete uniform distributions.
+    Gradient flows only to `source`; `target` must be detached by the caller.
+
+    With modality_sampling="random", the caller collects all valid video token
+    embeddings from video-active samples (source) and all valid audio token
+    embeddings from audio-active samples (target) across the batch, then calls
+    this function once with the two resulting point clouds.
+
+    Args:
+        source: (N_s, d) — e.g., all valid video tokens in the batch.
+        target: (N_t, d) — e.g., all valid audio tokens, detached.
+        eps:    Entropy regularisation coefficient.
+        n_iters: Sinkhorn iterations.
+
+    Returns:
+        Scalar OT cost (not normalised by batch size — caller multiplies by weight).
+    """
+    N_s, N_t = source.shape[0], target.shape[0]
+    if N_s == 0 or N_t == 0:
+        return source.new_zeros(())
+
+    # Cosine distance cost matrix ∈ [0, 2]
+    C = 1.0 - F.normalize(source, dim=-1) @ F.normalize(target, dim=-1).T  # (N_s, N_t)
+
+    log_K = -C / eps
+    log_mu = torch.log(source.new_full((N_s,), 1.0 / N_s))
+    log_nu = torch.log(source.new_full((N_t,), 1.0 / N_t))
+
+    log_u = source.new_zeros(N_s)
+    log_w = source.new_zeros(N_t)
+    for _ in range(n_iters):
+        log_u = log_mu - torch.logsumexp(log_K + log_w.unsqueeze(0), dim=1)
+        log_w = log_nu - torch.logsumexp(log_K + log_u.unsqueeze(1), dim=0)
+
+    log_P = log_K + log_u.unsqueeze(1) + log_w.unsqueeze(0)  # (N_s, N_t)
+    return (log_P.exp() * C).sum()
+
 
 # Define the custom model class
 @register_model("multimodal_embedder")
@@ -251,7 +300,6 @@ class MultiModalEmbedderModel(PreTrainedModel):
         return audio_embeds, audio_padding_mask
     
     def _fuse_modalities(self, video_embeds, video_mask, audio_embeds, audio_mask):
-        # Unimodal cases: no choice to make
         if video_embeds is None and audio_embeds is None:
             raise ValueError("Both video_embeds and audio_embeds are None — cannot fuse.")
         if video_embeds is None:
@@ -259,16 +307,30 @@ class MultiModalEmbedderModel(PreTrainedModel):
         if audio_embeds is None:
             return video_embeds, video_mask
 
-        # Both modalities available: sample uniformly
-        # Training only, at inference we expect a single modality to be passed
-        if self.training:
-            if torch.rand(1).item() < 0.5:
-                return video_embeds, video_mask
-            else:
-                return audio_embeds, audio_mask
-        else:
-            # At eval/inference, default to video
-            return video_embeds, video_mask
+        # Mixed batch: each row is either video-active or audio-active.
+        # Route each row to its active modality using per-sample selection.
+        B, T_v, d = video_embeds.shape
+        T_a = audio_embeds.shape[1]
+        device = video_embeds.device
+
+        _vm = video_mask if video_mask is not None else torch.ones(B, T_v, dtype=torch.long, device=device)
+        _am = audio_mask if audio_mask is not None else torch.ones(B, T_a, dtype=torch.long, device=device)
+
+        has_video = _vm.any(dim=1)  # (B,) bool — True for video-active rows
+
+        T_max = max(T_v, T_a)
+        if T_v < T_max:
+            video_embeds = torch.cat([video_embeds, video_embeds.new_zeros(B, T_max - T_v, d)], dim=1)
+            _vm = torch.cat([_vm, _vm.new_zeros(B, T_max - T_v)], dim=1)
+        if T_a < T_max:
+            audio_embeds = torch.cat([audio_embeds, audio_embeds.new_zeros(B, T_max - T_a, d)], dim=1)
+            _am = torch.cat([_am, _am.new_zeros(B, T_max - T_a)], dim=1)
+
+        sel = has_video.view(B, 1, 1)
+        return (
+            torch.where(sel, video_embeds, audio_embeds),
+            torch.where(has_video.unsqueeze(1), _vm, _am),
+        )
 
     def get_input_embeddings(self):
         """
@@ -545,15 +607,45 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 elif input_frames is not None and frames_padding_mask is None:
                     video_embeds, video_mask = self._process_video_branch(input_frames, None)
 
-                # Process audio branch if input_audio is provided and not all-padding
+                # Process audio branch if input_audio is provided and not all-padding.
                 if input_audio is not None and audio_padding_mask is not None and audio_padding_mask.any():
                     audio_embeds, audio_mask = self._process_audio_branch(input_audio, audio_padding_mask)
                 elif input_audio is not None and audio_padding_mask is None:
                     audio_embeds, audio_mask = self._process_audio_branch(input_audio, None)
 
+                # Sinkhorn OT alignment: video-active sample tokens vs audio-active sample tokens.
+                # In a mixed batch (modality_sampling="random"), no single sample has both valid
+                # video and audio, so we collect tokens across the batch instead.
+                # Gradient flows only into the video pathway (audio embeddings are detached).
+                self._alignment_loss = None
+                if video_embeds is not None and audio_embeds is not None:
+                    alignment_weight = getattr(self.config, 'alignment_weight', 0.1)
+                    if alignment_weight > 0.0:
+                        _vm = video_mask
+                        _am = audio_mask
+                        _has_vid = (
+                            _vm.any(dim=1) if _vm is not None
+                            else torch.ones(video_embeds.shape[0], dtype=torch.bool, device=video_embeds.device)
+                        )
+                        v_parts: list = []
+                        a_parts: list = []
+                        for b in range(video_embeds.shape[0]):
+                            if _has_vid[b]:
+                                L = int(_vm[b].sum().item()) if _vm is not None else video_embeds.shape[1]
+                                if L > 0:
+                                    v_parts.append(video_embeds[b, :L])
+                            else:
+                                L = int(_am[b].sum().item()) if _am is not None else audio_embeds.shape[1]
+                                if L > 0:
+                                    a_parts.append(audio_embeds[b, :L].detach())
+                        if v_parts and a_parts:
+                            self._alignment_loss = _sinkhorn_ot_loss(
+                                torch.cat(v_parts, dim=0),  # (N_v, d)
+                                torch.cat(a_parts, dim=0),  # (N_a, d) — detached
+                            ) * alignment_weight
+
                 if video_embeds is not None or audio_embeds is not None:
-                    # Fuse both modalities (or use whichever is available)
-                    inputs_embeds, attention_mask = self._fuse_modalities(
+                    inputs_embeds, attention_mask = self._fuse_modalities(  # type: ignore[assignment]
                         video_embeds, video_mask, audio_embeds, audio_mask
                     )
                 elif input_ids is not None:
@@ -581,7 +673,17 @@ class MultiModalEmbedderModel(PreTrainedModel):
                 eos_idx=self.eos_token_id, 
             )
         else:
-            if self.multimodal_mapper is not None:
+            # Apply mapper mask correction using the correct mapper for the active modality.
+            # During generation, prepare_inputs_for_generation propagates audio_padding_mask,
+            # so we can detect audio-active samples and avoid applying the video mapper.
+            if (
+                audio_padding_mask is not None
+                and audio_padding_mask.any()
+                and self.audio_multimodal_mapper is not None
+                and (frames_padding_mask is None or not frames_padding_mask.any())
+            ):
+                attention_mask = self.audio_multimodal_mapper.mask_correction(attention_mask)
+            elif self.multimodal_mapper is not None:
                 attention_mask = self.multimodal_mapper.mask_correction(attention_mask)
 
             # When encoder_outputs is not None, we still have to correct the mask
@@ -624,6 +726,11 @@ class MultiModalEmbedderModel(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+        alignment_loss = getattr(self, '_alignment_loss', None)
+        if alignment_loss is not None and outputs.loss is not None:
+            outputs.loss = outputs.loss + alignment_loss
+            self._alignment_loss = None
 
         return outputs
 
@@ -828,3 +935,4 @@ class MultiModalEmbedderModel(PreTrainedModel):
             f"for backbone {self.backbone.__class__.__name__}. "
             "Please implement manually."
         )
+

@@ -191,6 +191,7 @@ class MultiModalEmbedderConfig(PretrainedConfig):
         eos_token_id: Optional[int] = None,
         max_length: int = 200,
         use_backbone_max_length: bool = False,
+        alignment_weight: float = 0.1,
         **kwargs):
 
         # Pass remaining arguments to the parent (e.g. name, hashes, revisions)
@@ -247,6 +248,7 @@ class MultiModalEmbedderConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.max_length = max_length
         self.use_backbone_max_length = use_backbone_max_length
+        self.alignment_weight = alignment_weight
 
         # additional changes
         self.is_encoder_decoder = True
@@ -292,3 +294,4 @@ class MultiModalEmbedderConfig(PretrainedConfig):
         self.adapter_ksize = eval(self.adapter_ksize) if isinstance(self.adapter_ksize, str) else self.adapter_ksize
         self.adapter_stride = eval(self.adapter_stride) if isinstance(self.adapter_stride, str) else self.adapter_stride
         self.bos_token_id = self.bos_token_id if self.bos_token_id is not None else self.decoder_start_token_id
+

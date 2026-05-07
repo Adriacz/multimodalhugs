@@ -278,7 +278,7 @@ class DataCollatorMultimodalVideoAudio(DataCollatorMultimodalSeq2Seq):
     video_processor: Any = None
     audio_processor: Any = None
     modality_sampling: str = "random"
-    video_prob: float = 0.5
+    video_prob: float = 0.7
 
     def __init__(
         self,
@@ -286,7 +286,7 @@ class DataCollatorMultimodalVideoAudio(DataCollatorMultimodalSeq2Seq):
         audio_processor: Any,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         model: Optional[Any] = None,  # The model (optional, used to create decoder input IDs if needed)
-        modality_sampling: str = "ramdom",
+        modality_sampling: str = "random",
         video_prob: float = 0.5,
         padding: Union[bool, str, PaddingStrategy] = True,
         max_length: Optional[int] = None,

@@ -22,7 +22,7 @@ class MultimodalMapper(nn.Module):
                 layernorm_before=layer_norm_before
             )
 
-        if mapping_layer_type == 'cnn_adapter':
+        elif  mapping_layer_type == 'cnn_adapter':
             kwargs = {}
             if adapter_ksize is not None:
                 kwargs["kernel_sizes"] = adapter_ksize
