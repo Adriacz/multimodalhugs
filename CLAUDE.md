@@ -1,145 +1,331 @@
-# CLAUDE.md — MultiModalHugs
+# MultiModalHugs — Project Notes (feature/siamese-ot-av)
 
-## Project Overview
+## Objetivo del proyecto
 
-MultiModalHugs is a modular framework built on Hugging Face for training, evaluating, and deploying multimodal AI models. Primary focus: sign language translation and multimodal machine translation. Supports input modalities: pose sequences, video, images, SignWriting, precomputed features, and text.
+Sign Language Translation (SLT) de LSC (Llengua de Signes Catalana).
+El modelo de vídeo solo tiene mal rendimiento. La idea es usar el audio (Catalan speech)
+como señal auxiliar durante el preentrenamiento para mejorar el encoder de vídeo,
+y después hacer fine-tuning solo con vídeo para SLT.
 
-**Version:** 0.5.4
-**License:** MIT
-**Python package:** `multimodalhugs`
+**Dataset:** LSC-Parlament — interpretación parlamentaria.
+El mismo `.mp4` contiene ambas pistas: el hablante habla en catalán y el intérprete lo
+signa en LSC. El audio **siempre precede** al vídeo (el intérprete escucha antes de signar).
 
-## Build & Run
+---
 
-```bash
-# Install (editable, with dev deps)
-pip install -e ".[dev]"
+## Arquitectura base (MultiModalEmbedderModel)
 
-# Run all tests
-pytest tests/
-
-# Run specific test modules
-pytest tests/test_config/
-pytest tests/test_model_only/
-pytest tests/e2e_overfitting/
-
-# CLI entry points
-multimodalhugs-setup   # or mmhugs-setup   — initialize datasets, processors, models
-multimodalhugs-train   # or mmhugs-train   — train a model
-multimodalhugs-generate # or mmhugs-generate — evaluate and generate predictions
+```
+input_frames → FeatureExtractor → MultimodalMapper → merge_modalities → Backbone → logits
+                  (CLIP)            (Linear/CNN)        (encoder_prompt)   (mBART/M2M)
 ```
 
-## Key Dependencies
+- **FeatureExtractor**: wraps cualquier modelo HF. Tipos soportados: `"clip"`, `"whisper"`.
+- **MultimodalMapper**: proyecta de `feat_dim` a `d_model`. Tipos: `linear`, `adapter`, `cnn_adapter`.
+- **merge_modalities**: prepend del `encoder_prompt`, inserta EOS. Se llama en cada forward.
+- **Backbone**: mBART / M2M-100. El decoder genera la traducción autoregressivamente.
+- **Convención de máscara**: 0 = padding, 1 = válido en todo el framework.
 
-- `transformers <= 4.44.2`, `torch < 2.6`, `datasets`, `accelerate`
-- `pose-format >= 0.10.1`, `opencv-python`, `av >= 10.0.0`
-- `sacrebleu`, `evaluate`, `jiwer` (metrics)
-- `omegaconf` (YAML config), `sentencepiece`, `sacremoses` (tokenization)
-- Dev: `pytest`, `black`, `isort`, `pylint`
+---
 
-## Project Structure
+## Nuevos ficheros añadidos (branch feature/siamese-ot-av)
+
+### Dataset
+**`multimodalhugs/data/datasets/videoaudio2text.py`**
+- `VideoAudio2TextDataset` + `VideoAudio2TextDataConfig`
+- Lee TSVs de LSC-Parlament con columnas: `signal`, `signal_start`, `signal_end`, `audio_start`, `audio_end`, `encoder_prompt`, `decoder_prompt`, `output`.
+- Emite **dos columnas distintas** para el mismo path mp4: `video_signal` y `audio_signal`.
+  Esto evita la colisión de `primary_field` en los ProcessorSlots (el primero sobrescribiría
+  el valor de la columna `signal` con un tensor antes de que el segundo slot lo pueda leer).
+
+### Módulo OT
+**`multimodalhugs/modules/sinkhorn.py`**
+- `sinkhorn_loss(x, y, x_mask, y_mask, epsilon, max_iter)`: OT entre dos conjuntos de vectores de un sample.
+- `batch_sinkhorn_loss(x, y, x_mask, y_mask, epsilon, max_iter)`: media sobre el batch.
+- Implementación en dominio logarítmico (numéricamente estable para epsilon pequeño).
+- **Matriz de coste**: distancia coseno (`1 - x @ y.T` sobre vectores normalizados a esfera unitaria).
+- **Funciona con batch_size = 1**: el OT se calcula *dentro* de un sample (T_video frames vs T_audio frames),
+  no entre samples del batch. Por eso es compatible con batch_size = 1 en el cluster.
+
+### Modelo Siamese
+**`multimodalhugs/models/siamese_multimodal_embedder/`**
+
+`configuration_siamese_multimodal_embedder.py` — extiende `MultiModalEmbedderConfig` con:
+- `audio_feature_extractor_type` (e.g. `"whisper"`)
+- `audio_pretrained_feature_extractor` (e.g. `"openai/whisper-medium"`)
+- `audio_feat_dim` (1024 para Whisper-medium)
+- `audio_freeze_feature_extractor` (**debe ser `true`** — ver decisiones de diseño)
+- `audio_multimodal_mapper_type`, `_layer_norm_before`, `_layer_norm`, `_activation`, `_dropout`, `_factor`
+- `audio_freeze_multimodal_mapper`
+- `ot_lambda`, `sinkhorn_epsilon`, `sinkhorn_max_iter`
+
+`modeling_siamese_multimodal_embedder.py` — extiende `MultiModalEmbedderModel`:
+- `forward(input_audio=None)`: si `input_audio=None`, delega **exactamente** al padre (modo vídeo puro).
+- `forward(input_audio=tensor)`:
+  1. Vídeo: `FeatureExtractor` → `MultimodalMapper` → `video_repr [B, T_v, D]`
+  2. Audio: `AudioFeatureExtractor` (frozen) → `AudioMultimodalMapper` → `audio_repr [B, T_a, D]`
+  3. OT loss: `batch_sinkhorn_loss(video_repr, audio_repr, ...)`
+  4. Vídeo continúa: `merge_modalities` → `Backbone` → MT loss
+  5. `total_loss = MT_loss + ot_lambda * OT_loss`
+- `prepare_inputs_for_generation`: elimina `input_audio` antes de llamar a `generate()`.
+  **La generación es siempre modo vídeo puro**, incluso si el batch tiene audio.
+
+### Procesador de audio — soporte mp4
+**`multimodalhugs/processors/speech_modality_processor.py`** (modificado)
+- `_load_waveform()` ahora despacha según extensión del fichero:
+  - `.mp4`, `.mkv`, `.mov`, etc. → `_load_waveform_from_mp4()` usando **PyAV**
+    (más preciso para audio comprimido AAC dentro de contenedores de vídeo)
+  - `.wav`, `.flac`, etc. → torchaudio (comportamiento original, sin cambios)
+- **Backward compatible**: los pipelines `speech2text` existentes no cambian nada.
+
+---
+
+## Decisiones de diseño clave
+
+### Por qué Optimal Transport (no contrastivo/InfoNCE)
+- El cluster limita a **batch_size = 1**. Los métodos contrastivos (InfoNCE) necesitan
+  negativos de otros samples del mismo batch → no funcionan con BS=1.
+- OT es una pérdida *per-sample*: compara las T_video representaciones contra las T_audio
+  representaciones dentro de un solo ejemplo. Funciona con cualquier BS ≥ 1.
+- El audio **siempre precede** al vídeo (lag del intérprete). OT es invariante a posición
+  (encuentra el plan de transporte óptimo entre distribuciones), así que el desfase
+  temporal no es un problema.
+
+### Por qué congelar Whisper (`audio_freeze_feature_extractor: true`)
+- Whisper es un teacher con representaciones fonéticas ricas y estables.
+- Si ambos encoders son libres, el OT puede minimizarse haciendo que ambos converjan
+  hacia representaciones triviales (colapso de modo) en lugar de que el encoder de vídeo
+  aprenda características fonéticas reales.
+- Congelar Whisper ancla el espacio objetivo y ahorra ~300M params de gradientes/optimizer state.
+- **El audio mapper sí debe ser trainable** (`audio_freeze_multimodal_mapper: false`):
+  es el puente ligero de 1024-d → d_model y necesita aprender la proyección.
+
+### Colisión de primary_field en ProcessorSlots
+Si dos slots leen la misma columna TSV (`signal`), el primer slot la reemplaza por un tensor
+antes de que el segundo slot pueda leerla. Solución: `VideoAudio2TextDataset` emite
+`video_signal` y `audio_signal` con el mismo path pero keys distintos. Cada slot mapea
+su propia key: `{"video_signal": "signal", ...}` y `{"audio_signal": "signal", ...}`.
+
+---
+
+## Estructura de ficheros relevante
 
 ```
 multimodalhugs/
-├── data/                    # Data handling
-│   ├── datasets/            # HF GeneratorBasedBuilder subclasses (pose2text, video2text, etc.)
-│   ├── dataset_configs/     # Data config classes
-│   └── datacollators/       # Batching logic (MultimodalDataCollator)
-├── models/                  # Model architectures
-│   └── multimodal_embedder/ # Main model: FeatureExtractor + MultimodalMapper + Backbone
-├── modules/                 # Reusable components (adapters, mappers, embeddings)
-├── processors/              # Input processors per modality
-├── tasks/translation/       # Training + generation dispatchers, config dataclasses
-├── training_setup/          # Per-modality setup (dataset building, processor init, model creation)
-├── multimodalhugs_cli/      # CLI entry points (train, generate, setup)
-├── utils/                   # Registry, tokenizer utils, general helpers
-└── multilingual_seq2seq_trainer.py  # Custom Seq2SeqTrainer
+├── data/
+│   ├── __init__.py                          (+ lazy load VideoAudio2TextDataset)
+│   └── datasets/
+│       ├── video2text.py                    (existente)
+│       ├── speech2text.py                   (existente)
+│       └── videoaudio2text.py               (NUEVO)
+├── modules/
+│   ├── __init__.py                          (+ exporta sinkhorn_loss, batch_sinkhorn_loss)
+│   └── sinkhorn.py                          (NUEVO)
+├── models/
+│   ├── multimodal_embedder/                 (existente — no modificado)
+│   └── siamese_multimodal_embedder/         (NUEVO)
+│       ├── __init__.py
+│       ├── configuration_siamese_multimodal_embedder.py
+│       └── modeling_siamese_multimodal_embedder.py
+├── processors/
+│   └── speech_modality_processor.py         (modificado: soporte mp4 via PyAV)
+└── training_setup/
+    └── general_training_setup.py            (+ entrada "videoaudio2text" en _DATASET_IMPORT_MAP)
 ```
 
-## Architecture
+---
 
-**Three-component model** (`MultiModalEmbedderModel`):
-1. **FeatureExtractor** — wraps pretrained vision/audio models (CLIP, ViT, etc.)
-2. **MultimodalMapper** — maps features to embedding space (linear/adapter/cnn_adapter)
-3. **Backbone** — seq2seq model (M2M-100, mBART) for text generation
+## YAML de entrenamiento (Fase 1 — Siamese pretraining)
 
-**Data flow:** Raw data (TSV + media) → Dataset → Processor → DataCollator → Model → Trainer → Metrics
+```yaml
+model:
+  type: siamese_multimodal_embedder
+  # Vídeo
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  feat_dim: 512
+  freeze_feature_extractor: false
+  freeze_multimodal_mapper: false
+  # Audio (Whisper como teacher fijo)
+  audio_feature_extractor_type: whisper
+  audio_pretrained_feature_extractor: openai/whisper-medium
+  audio_multimodal_mapper_type: linear
+  audio_multimodal_mapper_layer_norm_before: true
+  audio_multimodal_mapper_layer_norm: false
+  audio_multimodal_mapper_activation: false
+  audio_multimodal_mapper_dropout: 0.1
+  audio_feat_dim: 1024
+  audio_freeze_feature_extractor: true   # <-- IMPORTANTE: congelar Whisper
+  audio_freeze_multimodal_mapper: false
+  # OT
+  ot_lambda: 1.0
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  # Backbone
+  backbone_type: m2m_100
+  pretrained_backbone: facebook/m2m100_418M
+  freeze_backbone: false
+  freeze_decoder_embed_tokens: false
+  freeze_encoder_embed_tokens: false
+  freeze_lm_head: false
+  max_length: 100
 
-**Configuration:** 3-tier system — YAML files + CLI args + dataclass defaults, merged via `merge_config_and_command_args()`.
+setup:
+  seed: 3435
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_multimodal/
 
-## Key Patterns
+training:
+  run_name: parlament_siamese_ot
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_multimodal
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_multimodal
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-05
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 0.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
 
-- **Registry pattern:** `@register_model`, `@register_dataset` decorators for dynamic loading
-- **Auto-registration:** `models/__init__.py` registers with HF's `AutoConfig`/`AutoModelForSeq2SeqLM`
-- **Composition:** Model composes feature extractor, mapper, and backbone
-- **HF-native:** Extends `PreTrainedModel`, `Seq2SeqTrainer`, `GeneratorBasedBuilder`
-- **Slot-based processors:** `MultimodalMetaProcessor` composes `ModalityProcessor` instances via `ProcessorSlot` objects; legacy task-specific wrappers live in `processors/legacy/`
+data:
+  dataset_type: videoaudio2text
+  name: lsc_parlament_multimodal
+  train_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/train.tsv
+  validation_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/validation.tsv
+  test_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/test.tsv
+  shuffle: true
+  max_frames: 700
 
-## Dataset Format
+processor:
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
 
-- TSV metadata files with columns: `signal`, `signal_start`, `signal_end`, `encoder_prompt`, `decoder_prompt`, `output`
-- Separate TSVs for train/val/test splits
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
 
-## Test Patterns
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: target
 
-- **pytest** with parametrization (`@pytest.mark.parametrize`)
-- **Fixture-based:** `model_setup` fixture for config variations, scoped per function
-- **Seed control:** torch, numpy, random, CUDA seeds + `cudnn.deterministic=True`
-- **Overfitting tests:** Train for N epochs, assert loss < threshold and WER <= threshold
-- **Config tests:** Validate max_length and backbone config behavior
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
 
-## Supported Modalities
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
+```
 
-| Modality     | Dataset Class              | ModalityProcessor                    | Legacy wrapper (processors/legacy/)      |
-|-------------|---------------------------|--------------------------------------|------------------------------------------|
-| Pose        | Pose2TextDataset          | PoseModalityProcessor                | Pose2TextTranslationProcessor            |
-| Video       | Video2TextDataset         | VideoModalityProcessor               | Video2TextTranslationProcessor           |
-| Image       | BilingualImage2TextDataset| ImageModalityProcessor               | Image2TextTranslationProcessor           |
-| SignWriting | SignWritingDataset        | SignwritingModalityProcessor         | SignwritingProcessor                     |
-| Features    | Features2TextDataset      | FeaturesModalityProcessor            | Features2TextTranslationProcessor        |
-| Text        | BilingualText2TextDataset | TextModalityProcessor                | Text2TextTranslationProcessor            |
+---
 
-## Style & Conventions
+## YAML de evaluación solo vídeo (generate.py / Fase 2)
 
-- Use `black` for formatting, `isort` for imports
-- Follow existing HF conventions for model/config/processor classes
-- YAML configs in `examples/` directories serve as templates
+Para evaluar el modelo entrenado usando solo vídeo, usar `dataset_type: video2text`
+con el mismo TSV — el dataset ignora las columnas de audio. El modelo siamese sin
+`input_audio` en el batch entra automáticamente en modo vídeo puro.
 
-## Development Environment
+```yaml
+model:
+  model_name_or_path: /ruta/al/checkpoint/siamese
+  type: siamese_multimodal_embedder
 
-**Python:** 3.11+ recommended, 3.8+ supported.
+data:
+  dataset_type: video2text
+  # mismo TSV que en entrenamiento
+  ...
+
+processor:
+  pipeline: video2text
+  tokenizer_path: facebook/m2m100_418M
+  new_vocabulary: "__lsc__"
+  modality_kwargs:
+    custom_preprocessor_path: openai/clip-vit-base-patch32
+    join_chw: false
+    skip_frames_stride: 3
+```
+
+Durante `generate()`:
+- `prepare_inputs_for_generation()` elimina `input_audio` si existiera.
+- `forward(input_audio=None)` delega al padre: pipeline vídeo puro.
+- Las métricas (sacrebleu/chrf) durante training también son vídeo puro (vía generate).
+- La eval loss durante training sí incluye el OT loss (útil para monitorizar alineamiento).
+
+---
+
+## Notas de instalación en el cluster
 
 ```bash
-# if necessary, install Python 3.11
-pyenv install 3.11
-
-# Create a venv and install with dev dependencies
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Skip e2e tests if the full suite takes too long (they download models from HuggingFace)
-pytest tests/ --ignore=tests/e2e_overfitting -v
+git clone https://github.com/Adriacz/multimodalhugs.git
+cd multimodalhugs
+git checkout feature/siamese-ot-av
+pip install -e ".[full]"
 ```
 
-**Known issue — TensorFlow mutex crash on macOS ARM:**
-TF 2.20+ uses protobuf 6.x, which conflicts with PyArrow (built against protobuf 5.x), causing a
-`mutex lock failed: Invalid argument` crash during pytest collection. This is triggered because
-`transformers` auto-initializes TF at import time when it detects TF is installed.
-
-**Fix:** Use Python 3.11 with `mediapipe<0.10.30`. This combination avoids the crash.
-See: https://github.com/tensorflow/tensorflow/issues/98563
-
-## Test Assets
-
-Some tests rely on committed binary assets in `tests/assets/` (pose files, videos, `.npy` files).
-The TSV metadata files for path-dependent modalities (video, pose, features) are **not committed**
-because they contain absolute paths. After cloning, regenerate them once:
-
-```bash
-python tests/assets/generate_assets.py
-```
-
-Text and image TSVs are committed directly and do not need regeneration.
+Dependencias clave: `torch<2.6`, `transformers<=4.44.2`, `av` (para leer audio de mp4).
