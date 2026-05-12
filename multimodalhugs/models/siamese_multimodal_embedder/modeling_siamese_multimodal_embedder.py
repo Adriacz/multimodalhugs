@@ -5,14 +5,13 @@ A two-pathway model for audio+video sign language translation pretraining.
 
 Phase 1 — forward(input_frames=..., input_audio=..., labels=...):
     Video path:  FeatureExtractor → MultimodalMapper → merge_modalities → Backbone (MT loss)
-    Audio path:  AudioFeatureExtractor (frozen) → AudioProjection
+    Audio path:  AudioFeatureExtractor → AudioMultimodalMapper
     Alignment:   OT loss between video_repr and audio_repr in d_model space.
     Total loss:  MT_loss + ot_lambda * OT_loss
 
-Phase 2 — forward(input_frames=..., input_audio=None, labels=...):
+Phase 2 / inference — forward(input_frames=..., input_audio=None, labels=...):
     Pure video forward, identical to the parent MultiModalEmbedderModel.
-
-Generation always runs in pure-video mode (input_audio is not passed).
+    Generation always runs in this mode (input_audio is not passed).
 """
 import logging
 from typing import Optional, Tuple, Union, Dict
@@ -25,9 +24,9 @@ from multimodalhugs.models.multimodal_embedder.modeling_multimodal_embedder impo
 from multimodalhugs.models.siamese_multimodal_embedder.configuration_siamese_multimodal_embedder import (
     SiameseMultiModalEmbedderConfig,
 )
-from multimodalhugs.modules import FeatureExtractor
+from multimodalhugs.modules import FeatureExtractor, MultimodalMapper
 from multimodalhugs.modules.sinkhorn import batch_sinkhorn_loss
-from multimodalhugs.modules.utils import set_module_parameters, merge_modalities
+from multimodalhugs.modules.utils import set_module_parameters, merge_modalities, merge_modalities_mask_correction
 from multimodalhugs.utils.registry import register_model
 
 logger = logging.getLogger(__name__)
@@ -39,9 +38,9 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
     Siamese multimodal model with OT-based audio↔video alignment.
 
     Inherits the full video pipeline from MultiModalEmbedderModel.
-    When ``input_audio`` is provided in forward(), the audio branch runs in
-    parallel and contributes an OT alignment loss.  When ``input_audio`` is
-    None the forward call is identical to the parent class.
+    When ``input_audio`` is provided in forward(), the audio branch runs
+    in parallel and contributes a Sinkhorn OT alignment loss.
+    When ``input_audio`` is None the call is identical to the parent class.
     """
 
     config_class = SiameseMultiModalEmbedderConfig
@@ -51,29 +50,46 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         self._init_audio_branch(config)
 
     # ------------------------------------------------------------------
-    # Initialisation helpers
+    # Initialisation
     # ------------------------------------------------------------------
 
     def _init_audio_branch(self, config: SiameseMultiModalEmbedderConfig):
         if config.audio_feature_extractor_type is None:
             self.audio_feature_extractor = None
-            self.audio_projection = None
+            self.audio_mapper = None
             return
 
         self.audio_feature_extractor = FeatureExtractor(
             feature_extractor_type=config.audio_feature_extractor_type,
-            pretrained_module=config.pretrained_audio_feature_extractor,
+            pretrained_module=config.audio_pretrained_feature_extractor,
         )
         set_module_parameters(
             self.audio_feature_extractor,
-            freeze=config.freeze_audio_feature_extractor,
+            freeze=config.audio_freeze_feature_extractor,
         )
 
-        # Project audio encoder output into the backbone's embedding space.
-        if config.audio_feat_dim != config.d_model:
-            self.audio_projection = nn.Linear(config.audio_feat_dim, config.d_model)
+        if config.audio_multimodal_mapper_type is not None:
+            self.audio_mapper = MultimodalMapper(
+                feat_dim=config.audio_feat_dim,
+                output_dim=config.d_model,
+                mapping_layer_type=config.audio_multimodal_mapper_type,
+                layer_norm_before=config.audio_multimodal_mapper_layer_norm_before,
+                adapter_factor=config.audio_multimodal_mapper_factor,
+                p_dropout=config.audio_multimodal_mapper_dropout,
+                layer_norm=config.audio_multimodal_mapper_layer_norm,
+                activation=config.audio_multimodal_mapper_activation,
+            )
+            set_module_parameters(
+                self.audio_mapper,
+                freeze=config.audio_freeze_multimodal_mapper,
+            )
         else:
-            self.audio_projection = nn.Identity()
+            # No mapper config → plain linear projection as fallback.
+            self.audio_mapper = (
+                nn.Linear(config.audio_feat_dim, config.d_model)
+                if config.audio_feat_dim != config.d_model
+                else nn.Identity()
+            )
 
     # ------------------------------------------------------------------
     # Forward
@@ -104,20 +120,13 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.Tensor], Seq2SeqLMOutput]:
         """
-        Forward pass.
-
-        When ``input_audio`` is None, delegates entirely to the parent class
-        (pure video mode — identical behaviour to MultiModalEmbedderModel).
-
-        When ``input_audio`` is provided (shape [B, n_mels, T_mel]):
-            1. Runs the full video pipeline up to (and including) the mapper to
-               obtain video_repr [B, T_v, D].
-            2. Runs the frozen audio encoder + projection to obtain
-               audio_repr [B, T_a, D].
-            3. Computes the Sinkhorn OT loss between video_repr and audio_repr.
-            4. Continues the video path through merge_modalities + backbone to
-               obtain the MT loss.
-            5. Returns total_loss = MT_loss + ot_lambda * OT_loss.
+        When ``input_audio`` is None → pure video mode (identical to parent).
+        When ``input_audio`` is provided ([B, n_mels, T_mel]):
+            1. Video:  FeatureExtractor + MultimodalMapper → video_repr [B, T_v, D]
+            2. Audio:  AudioFeatureExtractor + AudioMapper → audio_repr [B, T_a, D]
+            3. Loss:   OT_loss = batch_sinkhorn_loss(video_repr, audio_repr)
+            4. Video continues: merge_modalities + Backbone → MT_loss
+            5. Return: MT_loss + ot_lambda * OT_loss
         """
         # ── Pure-video fallback ────────────────────────────────────────────
         if input_audio is None or self.audio_feature_extractor is None:
@@ -143,13 +152,13 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 return_dict=return_dict,
             )
 
-        # ── Audio+video training path ──────────────────────────────────────
+        # ── Audio + video training path ────────────────────────────────────
         if encoder_outputs is None:
             if labels is not None:
                 decoder_input_ids = None
                 decoder_attention_mask = None
 
-            # --- Video pipeline (FeatureExtractor + MultimodalMapper) ---
+            # --- Video: FeatureExtractor ---
             if inputs_embeds is None and input_frames is not None:
                 if self.feature_extractor is None:
                     inputs_embeds = input_frames
@@ -162,23 +171,30 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                             (B, T), dtype=attention_mask.dtype, device=attention_mask.device
                         )
 
+            # --- Video: MultimodalMapper ---
             if self.multimodal_mapper is not None and inputs_embeds is not None:
                 inputs_embeds, attention_mask = self.multimodal_mapper(inputs_embeds, attention_mask)
-            # inputs_embeds: [B, T_v, D], attention_mask: [B, T_v]
+            # inputs_embeds: [B, T_v, D],  attention_mask: [B, T_v]
 
-            # --- Audio pipeline (frozen encoder + projection) ---
-            with torch.no_grad() if self.config.freeze_audio_feature_extractor else torch.enable_grad():
+            # --- Audio: FeatureExtractor ---
+            with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)  # [B, T_a, D_audio]
 
-            # Whisper encoder always outputs fixed-length; mask is all-ones.
+            # Whisper always outputs a fixed-length sequence regardless of input;
+            # the incoming audio_attention_mask reflects mel padding, not encoder
+            # output length.  Reset to all-ones in encoder output space.
             B_a, T_a = audio_repr.shape[:2]
             audio_mask = torch.ones(
                 (B_a, T_a), dtype=torch.long, device=audio_repr.device
             )
 
-            audio_repr = self.audio_projection(audio_repr)  # [B, T_a, D]
+            # --- Audio: Mapper (MultimodalMapper or plain Linear) ---
+            if isinstance(self.audio_mapper, MultimodalMapper):
+                audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
+            elif self.audio_mapper is not None:
+                audio_repr = self.audio_mapper(audio_repr)
 
-            # --- Sinkhorn OT loss ---
+            # --- Sinkhorn OT loss (video_repr vs audio_repr, both in d_model space) ---
             ot_loss = batch_sinkhorn_loss(
                 x=inputs_embeds,
                 y=audio_repr,
@@ -188,7 +204,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 max_iter=self.config.sinkhorn_max_iter,
             )
 
-            # --- merge_modalities + backbone (video path continues) ---
+            # --- Video continues: merge_modalities + Backbone ---
             if inputs_embeds is None:
                 inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
                 input_ids = None
@@ -202,11 +218,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 pad_idx=self.pad_token_id,
                 eos_idx=self.eos_token_id,
             )
+
         else:
-            # encoder_outputs provided (e.g. cached) — use parent's mask correction.
+            # Cached encoder outputs — apply mask corrections only; no OT loss.
             if self.multimodal_mapper is not None:
                 attention_mask = self.multimodal_mapper.mask_correction(attention_mask)
-            from multimodalhugs.modules.utils import merge_modalities_mask_correction
             attention_mask = merge_modalities_mask_correction(
                 padding_mask=attention_mask,
                 prompt=encoder_prompt,
@@ -215,8 +231,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 pad_idx=self.pad_token_id,
                 eos_idx=self.eos_token_id,
             )
-            # No OT loss when encoder_outputs are cached.
-            ot_loss = torch.tensor(0.0, device=attention_mask.device if attention_mask is not None else torch.device("cpu"))
+            ot_loss = torch.tensor(0.0, device=next(self.parameters()).device)
 
         outputs = self.backbone(
             input_ids=input_ids,
@@ -257,11 +272,10 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         )
 
     # ------------------------------------------------------------------
-    # prepare_inputs_for_generation — generation uses pure video mode
+    # Generation — always pure-video (audio branch not used at inference)
     # ------------------------------------------------------------------
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
-        # input_audio is not relevant during generation; strip it if present.
         kwargs.pop("input_audio", None)
         kwargs.pop("audio_attention_mask", None)
         return super().prepare_inputs_for_generation(*args, **kwargs)
