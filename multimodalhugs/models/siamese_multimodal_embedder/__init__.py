@@ -1,0 +1,6 @@
+from .modeling_siamese_multimodal_embedder import SiameseMultiModalEmbedderModel
+from .configuration_siamese_multimodal_embedder import SiameseMultiModalEmbedderConfig
+
+MODEL_CLASS = SiameseMultiModalEmbedderModel
+CONFIG_CLASS = SiameseMultiModalEmbedderConfig
+CONFIG_NAME = "siamese_multimodal_embedder"
