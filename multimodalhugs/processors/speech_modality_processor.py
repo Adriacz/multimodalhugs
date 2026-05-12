@@ -10,6 +10,12 @@ import torchaudio
 import torchaudio.transforms as T
 from transformers import AutoProcessor
 
+try:
+    import av as _av
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
+
 from multimodalhugs.data import pad_and_create_mask
 from multimodalhugs.processors.modality_processor import ModalityProcessor, ProcessBatchOutput
 from multimodalhugs.processors.utils import get_dynamic_cache_size, SignalUnit
@@ -111,6 +117,89 @@ class SpeechModalityProcessor(ModalityProcessor):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _load_waveform_from_mp4(
+        self,
+        audio_path: Union[str, Path],
+        signal_start: float = 0.0,
+        signal_end: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        Load an audio slice from an .mp4 container using PyAV.
+
+        PyAV provides accurate seek + decode for compressed audio (AAC, MP3)
+        inside video containers, avoiding the timestamp drift that torchaudio
+        can produce when seeking compressed streams.
+
+        Args:
+            audio_path: Path to an .mp4 (or other container) file.
+            signal_start: Clip start in milliseconds. 0.0 = file start.
+            signal_end: Clip end in milliseconds. 0.0 = file end.
+
+        Returns:
+            Waveform tensor of shape [1, T] (mono, float32, TARGET_SAMPLE_RATE).
+        """
+        if not _AV_AVAILABLE:
+            raise ImportError(
+                "PyAV is required to load audio from .mp4 files. "
+                "Install it with: pip install av"
+            )
+
+        start_sec = (signal_start or 0.0) / 1000.0
+        end_sec   = (signal_end / 1000.0) if signal_end else None
+
+        container = _av.open(str(audio_path))
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+        if audio_stream is None:
+            container.close()
+            raise ValueError(f"No audio stream found in '{audio_path}'")
+
+        native_sr = audio_stream.codec_context.sample_rate
+
+        # Seek to slightly before the target start to avoid decoder artifacts.
+        if start_sec > 0:
+            seek_pts = max(0, int((start_sec - 0.1) * _av.time_base))
+            container.seek(seek_pts)
+
+        chunks = []
+        for packet in container.demux(audio_stream):
+            for frame in packet.decode():
+                t = float(frame.pts * audio_stream.time_base)
+                if t + frame.samples / native_sr < start_sec:
+                    continue
+                if end_sec is not None and t > end_sec:
+                    break
+                # frame.to_ndarray(): [channels, samples] or [samples] depending on layout
+                arr = frame.to_ndarray()
+                if arr.ndim == 1:
+                    arr = arr[None, :]  # [1, samples]
+                chunks.append(torch.from_numpy(arr.copy()).float())
+
+        container.close()
+
+        if not chunks:
+            raise ValueError(
+                f"No audio frames decoded from '{audio_path}' "
+                f"in [{signal_start}, {signal_end}] ms."
+            )
+
+        waveform = torch.cat(chunks, dim=-1)  # [C, T]
+
+        # Trim to exact boundaries in sample space.
+        start_sample = int(start_sec * native_sr)
+        end_sample   = int(end_sec * native_sr) if end_sec is not None else waveform.shape[-1]
+        waveform = waveform[:, start_sample:end_sample]
+
+        # Mix down to mono: [C, T] → [1, T]
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        # Resample to TARGET_SAMPLE_RATE if necessary.
+        if native_sr != self.TARGET_SAMPLE_RATE:
+            resampler = T.Resample(orig_freq=native_sr, new_freq=self.TARGET_SAMPLE_RATE)
+            waveform = resampler(waveform)
+
+        return waveform.to(torch.float32)  # [1, T]
+
     def _load_waveform(
         self,
         audio_path: Union[str, Path],
@@ -118,19 +207,27 @@ class SpeechModalityProcessor(ModalityProcessor):
         signal_end: float = 0.0,
     ) -> torch.Tensor:
         """
-        Load a slice of a .wav file as a waveform tensor [1, T] at
-        TARGET_SAMPLE_RATE. Resamples if the file's native rate differs.
+        Load a slice of an audio file as a waveform tensor [1, T] at
+        TARGET_SAMPLE_RATE.
+
+        Dispatches to ``_load_waveform_from_mp4`` for .mp4/.mp3/.mkv containers
+        (using PyAV for accurate compressed-audio seeking) and falls back to
+        torchaudio for .wav and other lossless formats.
 
         Args:
-            audio_path: Path to a .wav audio file.
-            signal_start: Clip start in milliseconds (mapped from ``audio_start``
-                in the TSV via the ProcessorSlot column_map). 0.0 means start of file.
-            signal_end: Clip end in milliseconds (mapped from ``audio_end``
-                in the TSV via the ProcessorSlot column_map). 0.0 means end of file.
+            audio_path: Path to the audio/video file.
+            signal_start: Clip start in milliseconds. 0.0 = start of file.
+            signal_end: Clip end in milliseconds. 0.0 = end of file.
 
         Returns:
             Waveform tensor of shape [1, T] (mono, float32, 16 kHz).
         """
+        ext = Path(str(audio_path)).suffix.lower()
+        _CONTAINER_FORMATS = {".mp4", ".mkv", ".mov", ".avi", ".mp3", ".m4a", ".aac"}
+        if ext in _CONTAINER_FORMATS:
+            return self._load_waveform_from_mp4(audio_path, signal_start, signal_end)
+
+        # --- torchaudio path (wav, flac, ogg, …) ---
         info = torchaudio.info(str(audio_path))
         native_sr = info.sample_rate
 
