@@ -161,6 +161,7 @@ class SpeechModalityProcessor(ModalityProcessor):
             container.seek(seek_pts)
 
         chunks = []
+        chunk_start_sec = None  # PTS of the first included frame
         for packet in container.demux(audio_stream):
             for frame in packet.decode():
                 t = float(frame.pts * audio_stream.time_base)
@@ -173,6 +174,8 @@ class SpeechModalityProcessor(ModalityProcessor):
                 if arr.ndim == 1:
                     arr = arr[None, :]  # [1, samples]
                 chunks.append(torch.from_numpy(arr.copy()).float())
+                if chunk_start_sec is None:
+                    chunk_start_sec = t
 
         container.close()
 
@@ -184,10 +187,24 @@ class SpeechModalityProcessor(ModalityProcessor):
 
         waveform = torch.cat(chunks, dim=-1)  # [C, T]
 
-        # Trim to exact boundaries in sample space.
-        start_sample = int(start_sec * native_sr)
-        end_sample   = int(end_sec * native_sr) if end_sec is not None else waveform.shape[-1]
-        waveform = waveform[:, start_sample:end_sample]
+        # Trim to exact boundaries relative to the first decoded frame's PTS.
+        # Pre-cut mp4 clips preserve original session timestamps (e.g. a clip covering
+        # 3317–3976 ms has frames with PTS starting at ~3.317 s, not 0). Using absolute
+        # sample indices (int(start_sec * sr)) would index past the end of the waveform.
+        _chunk_start = chunk_start_sec if chunk_start_sec is not None else start_sec
+        rel_start = max(0, int((start_sec - _chunk_start) * native_sr))
+        rel_end = (
+            int((end_sec - _chunk_start) * native_sr) if end_sec is not None else waveform.shape[-1]
+        )
+        rel_end = min(rel_end, waveform.shape[-1])
+        waveform = waveform[:, rel_start:rel_end]
+
+        if waveform.shape[-1] == 0:
+            raise ValueError(
+                f"Audio segment has zero samples after trimming '{audio_path}' "
+                f"to [{signal_start}, {signal_end}] ms "
+                f"(chunk_start={_chunk_start:.4f}s, rel_start={rel_start}, rel_end={rel_end})."
+            )
 
         # Mix down to mono: [C, T] → [1, T]
         if waveform.shape[0] > 1:
