@@ -9,9 +9,12 @@ Phase 1 — forward(input_frames=..., input_audio=..., labels=...):
     Alignment:   OT loss between video_repr and audio_repr in d_model space.
     Total loss:  MT_loss + ot_lambda * OT_loss
 
-Phase 2 / inference — forward(input_frames=..., input_audio=None, labels=...):
+Phase 2a / video inference — forward(input_frames=..., input_audio=None, labels=...):
     Pure video forward, identical to the parent MultiModalEmbedderModel.
-    Generation always runs in this mode (input_audio is not passed).
+
+Phase 2b / audio inference — forward(input_frames=None, input_audio=..., labels=...):
+    Audio-only forward: AudioFE → AudioMapper → merge_modalities → Backbone (MT loss only).
+    Used for the separate audio-only eval pass during training.
 """
 import logging
 from typing import Optional, Tuple, Union, Dict
@@ -92,6 +95,113 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             )
 
     # ------------------------------------------------------------------
+    # Audio-only forward (eval / inference)
+    # ------------------------------------------------------------------
+
+    def _forward_audio_only(
+        self,
+        input_audio: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        encoder_prompt: Optional[torch.LongTensor],
+        encoder_prompt_length_padding_mask: Optional[torch.LongTensor],
+        decoder_input_ids: Optional[torch.LongTensor],
+        decoder_attention_mask: Optional[torch.LongTensor],
+        head_mask: Optional[torch.Tensor],
+        decoder_head_mask: Optional[torch.Tensor],
+        cross_attn_head_mask: Optional[torch.Tensor],
+        encoder_outputs: Optional[Tuple],
+        past_key_values: Optional[Tuple],
+        decoder_inputs_embeds: Optional[torch.FloatTensor],
+        labels: Optional[torch.LongTensor],
+        use_cache: Optional[bool],
+        output_attentions: Optional[bool],
+        output_hidden_states: Optional[bool],
+        return_dict: Optional[bool],
+    ) -> Union[Tuple[torch.Tensor], Seq2SeqLMOutput]:
+        """Audio-only forward: AudioFE → AudioMapper → merge_modalities → Backbone (pure MT loss)."""
+        inputs_embeds = None
+
+        if encoder_outputs is None:
+            if labels is not None:
+                decoder_input_ids = None
+                decoder_attention_mask = None
+
+            with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
+                audio_repr = self.audio_feature_extractor(input_audio)
+
+            B_a, T_a = audio_repr.shape[:2]
+            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+
+            if isinstance(self.audio_mapper, MultimodalMapper):
+                audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
+            elif self.audio_mapper is not None:
+                audio_repr = self.audio_mapper(audio_repr)
+
+            inputs_embeds, attention_mask = merge_modalities(
+                x=audio_repr,
+                padding_mask=audio_mask,
+                prompt=encoder_prompt,
+                prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                embeddings_module=self.get_backbone_encoder.embed_tokens,
+                pad_idx=self.pad_token_id,
+                eos_idx=self.eos_token_id,
+            )
+        else:
+            # Cached encoder outputs: reconstruct attention_mask to full length.
+            if attention_mask is None:
+                B = encoder_outputs[0].shape[0]
+                T = encoder_outputs[0].shape[1]
+                attention_mask = torch.ones(
+                    (B, T), dtype=torch.long, device=encoder_outputs[0].device
+                )
+            else:
+                if isinstance(self.audio_mapper, MultimodalMapper):
+                    attention_mask = self.audio_mapper.mask_correction(attention_mask)
+                attention_mask = merge_modalities_mask_correction(
+                    padding_mask=attention_mask,
+                    prompt=encoder_prompt,
+                    prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                    embeddings_module=self.get_backbone_encoder.embed_tokens,
+                    pad_idx=self.pad_token_id,
+                    eos_idx=self.eos_token_id,
+                )
+
+        outputs = self.backbone(
+            input_ids=None,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
+            head_mask=head_mask,
+            decoder_head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            encoder_outputs=encoder_outputs,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds if encoder_outputs is None else None,
+            decoder_inputs_embeds=decoder_inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        if not (return_dict if return_dict is not None else True):
+            output = (outputs.logits,) + outputs[1:]
+            return (outputs.loss,) + output if outputs.loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=outputs.loss,
+            logits=outputs.logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
@@ -121,12 +231,8 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
     ) -> Union[Tuple[torch.Tensor], Seq2SeqLMOutput]:
         """
         When ``input_audio`` is None → pure video mode (identical to parent).
-        When ``input_audio`` is provided ([B, n_mels, T_mel]):
-            1. Video:  FeatureExtractor + MultimodalMapper → video_repr [B, T_v, D]
-            2. Audio:  AudioFeatureExtractor + AudioMapper → audio_repr [B, T_a, D]
-            3. Loss:   OT_loss = batch_sinkhorn_loss(video_repr, audio_repr)
-            4. Video continues: merge_modalities + Backbone → MT_loss
-            5. Return: MT_loss + ot_lambda * OT_loss
+        When ``input_frames`` is None and ``input_audio`` is provided → audio-only mode (MT loss only).
+        When both are provided → Siamese training mode (OT + MT loss).
         """
         # ── Pure-video fallback ────────────────────────────────────────────
         if input_audio is None or self.audio_feature_extractor is None:
@@ -144,6 +250,28 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 encoder_outputs=encoder_outputs,
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
+                decoder_inputs_embeds=decoder_inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        # ── Audio-only mode (eval / inference) ────────────────────────────
+        if input_frames is None:
+            return self._forward_audio_only(
+                input_audio=input_audio,
+                attention_mask=attention_mask,
+                encoder_prompt=encoder_prompt,
+                encoder_prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                head_mask=head_mask,
+                decoder_head_mask=decoder_head_mask,
+                cross_attn_head_mask=cross_attn_head_mask,
+                encoder_outputs=encoder_outputs,
+                past_key_values=past_key_values,
                 decoder_inputs_embeds=decoder_inputs_embeds,
                 labels=labels,
                 use_cache=use_cache,
@@ -272,10 +400,20 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         )
 
     # ------------------------------------------------------------------
-    # Generation — always pure-video (audio branch not used at inference)
+    # Generation — video-only or audio-only depending on which input is present
     # ------------------------------------------------------------------
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
-        kwargs.pop("input_audio", None)
-        kwargs.pop("audio_attention_mask", None)
-        return super().prepare_inputs_for_generation(*args, **kwargs)
+        if kwargs.get("input_frames") is not None:
+            # Video mode: strip audio before delegating to parent.
+            kwargs.pop("input_audio", None)
+            kwargs.pop("audio_attention_mask", None)
+            return super().prepare_inputs_for_generation(*args, **kwargs)
+
+        # Audio-only mode: let parent run (won't add input_frames since it's None),
+        # then inject input_audio into the returned model_inputs dict.
+        input_audio = kwargs.get("input_audio", None)
+        model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
+        if input_audio is not None:
+            model_inputs["input_audio"] = input_audio
+        return model_inputs

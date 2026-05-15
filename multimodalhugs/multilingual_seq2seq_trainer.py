@@ -97,6 +97,34 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             print(f"Prediction - {decoded_prediction[i]}")
             
 
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix: str = "eval",
+    ):
+        """Run standard eval, then a second audio-only pass when the model has an audio branch."""
+        metrics = super().evaluate(
+            eval_dataset=eval_dataset,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
+
+        model = self.model
+        if getattr(model, "audio_feature_extractor", None) is not None:
+            self._drop_keys_in_eval = {"input_frames", "attention_mask"}
+            try:
+                audio_metrics = super().evaluate(
+                    eval_dataset=eval_dataset,
+                    ignore_keys=ignore_keys,
+                    metric_key_prefix=f"{metric_key_prefix}_audio",
+                )
+            finally:
+                self._drop_keys_in_eval = None
+            metrics.update(audio_metrics)
+
+        return metrics
+
     def prediction_step(
         self,
         model: nn.Module,
@@ -134,6 +162,12 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             )
         has_labels = "labels" in inputs
         inputs = self._prepare_inputs(inputs)
+
+        # Drop modality-specific keys for audio-only or future video-only eval passes.
+        drop_keys = getattr(self, "_drop_keys_in_eval", None)
+        if drop_keys:
+            inputs = {k: v for k, v in inputs.items() if k not in drop_keys}
+
         # Priority (handled in generate):
         # non-`None` gen_kwargs > model.generation_config > default GenerationConfig()
         if len(gen_kwargs) == 0 and hasattr(self, "_gen_kwargs"):
