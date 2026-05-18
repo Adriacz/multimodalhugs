@@ -83,6 +83,10 @@ _DATASET_IMPORT_MAP: dict = {
         "multimodalhugs.data.datasets.speech2text",
         ("Speech2TextDataset", "Speech2TextDataConfig"),
     ),
+    "videoaudio2text": (
+        "multimodalhugs.data.datasets.videoaudio2text",
+        ("VideoAudio2TextDataset", "VideoAudio2TextDataConfig"),
+    ),
 }
 
 
