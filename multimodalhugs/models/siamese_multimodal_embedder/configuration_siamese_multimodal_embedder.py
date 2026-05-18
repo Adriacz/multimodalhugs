@@ -11,10 +11,17 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
     an audio-specific MultimodalMapper, and Optimal Transport alignment params.
 
     Video pathway (unchanged from parent):
-        FeatureExtractor → MultimodalMapper → merge_modalities → Backbone
+        FeatureExtractor → MultimodalMapper → [merge_modalities →] Backbone
 
     Audio pathway (added):
         AudioFeatureExtractor → AudioMultimodalMapper → OT loss (then discarded)
+
+    OT can be applied at two positions, controlled by ``ot_position``:
+        ``"mapper"``  — between video_repr and audio_repr after their mappers
+                        (d_model space, before merge_modalities / backbone encoder).
+        ``"encoder"`` — between the M2M encoder outputs of both modalities
+                        (backbone encoder is run explicitly for both paths;
+                        audio encoder pass uses no_grad since backbone is frozen).
 
     Args:
         audio_feature_extractor_type: Type string for the audio encoder,
@@ -35,6 +42,8 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         ot_lambda: Weight for the Sinkhorn OT loss.  0.0 disables it.
         sinkhorn_epsilon: Entropy regularization for Sinkhorn.
         sinkhorn_max_iter: Number of Sinkhorn iterations.
+        ot_position: Where OT is applied — ``"mapper"`` (default) or ``"encoder"``.
+        eval_audio: Run a second audio-only eval pass during training.
     """
 
     model_type = "siamese_multimodal_embedder"
@@ -59,6 +68,7 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         ot_lambda: float = 1.0,
         sinkhorn_epsilon: float = 0.1,
         sinkhorn_max_iter: int = 100,
+        ot_position: str = "mapper",
         # --- Eval ---
         eval_audio: bool = True,
         **kwargs,
@@ -81,4 +91,5 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         self.ot_lambda = ot_lambda
         self.sinkhorn_epsilon = sinkhorn_epsilon
         self.sinkhorn_max_iter = sinkhorn_max_iter
+        self.ot_position = ot_position
         self.eval_audio = eval_audio
