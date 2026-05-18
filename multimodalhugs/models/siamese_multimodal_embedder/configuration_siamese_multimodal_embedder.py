@@ -59,6 +59,8 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         ot_lambda: float = 1.0,
         sinkhorn_epsilon: float = 0.1,
         sinkhorn_max_iter: int = 100,
+        # --- Eval ---
+        eval_audio: bool = True,
         **kwargs,
     ):
         super().__init__(model_type=model_type, **kwargs)
@@ -79,3 +81,4 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         self.ot_lambda = ot_lambda
         self.sinkhorn_epsilon = sinkhorn_epsilon
         self.sinkhorn_max_iter = sinkhorn_max_iter
+        self.eval_audio = eval_audio

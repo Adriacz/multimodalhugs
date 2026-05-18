@@ -111,7 +111,10 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         )
 
         model = self.model
-        if getattr(model, "audio_feature_extractor", None) is not None:
+        if (
+            getattr(model, "audio_feature_extractor", None) is not None
+            and getattr(getattr(model, "config", None), "eval_audio", True)
+        ):
             self._drop_keys_in_eval = {"input_frames", "attention_mask"}
             try:
                 audio_metrics = super().evaluate(
