@@ -322,30 +322,116 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             elif self.audio_mapper is not None:
                 audio_repr = self.audio_mapper(audio_repr)
 
-            # --- Sinkhorn OT loss (video_repr vs audio_repr, both in d_model space) ---
-            ot_loss = batch_sinkhorn_loss(
-                x=inputs_embeds,
-                y=audio_repr,
-                x_mask=attention_mask,
-                y_mask=audio_mask,
-                epsilon=self.config.sinkhorn_epsilon,
-                max_iter=self.config.sinkhorn_max_iter,
-            )
+            if self.config.ot_position == "encoder":
+                # ── OT at M2M encoder output ───────────────────────────────
+                # merge_modalities for video, then run backbone encoder explicitly
+                if inputs_embeds is None:
+                    inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
+                    input_ids = None
 
-            # --- Video continues: merge_modalities + Backbone ---
-            if inputs_embeds is None:
-                inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
-                input_ids = None
+                inputs_embeds, attention_mask = merge_modalities(
+                    x=inputs_embeds,
+                    padding_mask=attention_mask,
+                    prompt=encoder_prompt,
+                    prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                    embeddings_module=self.get_backbone_encoder.embed_tokens,
+                    pad_idx=self.pad_token_id,
+                    eos_idx=self.eos_token_id,
+                )
+                video_enc_out = self.get_backbone_encoder(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                )
 
-            inputs_embeds, attention_mask = merge_modalities(
-                x=inputs_embeds,
-                padding_mask=attention_mask,
-                prompt=encoder_prompt,
-                prompt_length_padding_mask=encoder_prompt_length_padding_mask,
-                embeddings_module=self.get_backbone_encoder.embed_tokens,
-                pad_idx=self.pad_token_id,
-                eos_idx=self.eos_token_id,
-            )
+                # merge_modalities for audio + backbone encoder (no_grad: backbone frozen)
+                with torch.no_grad():
+                    audio_inputs_embeds, audio_enc_attn = merge_modalities(
+                        x=audio_repr,
+                        padding_mask=audio_mask,
+                        prompt=encoder_prompt,
+                        prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                        embeddings_module=self.get_backbone_encoder.embed_tokens,
+                        pad_idx=self.pad_token_id,
+                        eos_idx=self.eos_token_id,
+                    )
+                    audio_enc_out = self.get_backbone_encoder(
+                        inputs_embeds=audio_inputs_embeds,
+                        attention_mask=audio_enc_attn,
+                    )
+
+                ot_loss = batch_sinkhorn_loss(
+                    x=video_enc_out.last_hidden_state,
+                    y=audio_enc_out.last_hidden_state,
+                    x_mask=attention_mask,
+                    y_mask=audio_enc_attn,
+                    epsilon=self.config.sinkhorn_epsilon,
+                    max_iter=self.config.sinkhorn_max_iter,
+                )
+
+                # Full backbone forward with cached video encoder output
+                outputs = self.backbone(
+                    input_ids=None,
+                    attention_mask=attention_mask,
+                    decoder_input_ids=decoder_input_ids,
+                    decoder_attention_mask=decoder_attention_mask,
+                    head_mask=head_mask,
+                    decoder_head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    encoder_outputs=video_enc_out,
+                    past_key_values=past_key_values,
+                    inputs_embeds=None,
+                    decoder_inputs_embeds=decoder_inputs_embeds,
+                    labels=labels,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                )
+
+            else:
+                # ── OT at mapper output (default) ──────────────────────────
+                ot_loss = batch_sinkhorn_loss(
+                    x=inputs_embeds,
+                    y=audio_repr,
+                    x_mask=attention_mask,
+                    y_mask=audio_mask,
+                    epsilon=self.config.sinkhorn_epsilon,
+                    max_iter=self.config.sinkhorn_max_iter,
+                )
+
+                # --- Video continues: merge_modalities + Backbone ---
+                if inputs_embeds is None:
+                    inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
+                    input_ids = None
+
+                inputs_embeds, attention_mask = merge_modalities(
+                    x=inputs_embeds,
+                    padding_mask=attention_mask,
+                    prompt=encoder_prompt,
+                    prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                    embeddings_module=self.get_backbone_encoder.embed_tokens,
+                    pad_idx=self.pad_token_id,
+                    eos_idx=self.eos_token_id,
+                )
+
+                outputs = self.backbone(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    decoder_input_ids=decoder_input_ids,
+                    decoder_attention_mask=decoder_attention_mask,
+                    head_mask=head_mask,
+                    decoder_head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    encoder_outputs=None,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    decoder_inputs_embeds=decoder_inputs_embeds,
+                    labels=labels,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                )
 
         else:
             # Cached encoder outputs — apply mask corrections only; no OT loss.
@@ -361,24 +447,24 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             )
             ot_loss = torch.tensor(0.0, device=next(self.parameters()).device)
 
-        outputs = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=decoder_input_ids,
-            decoder_attention_mask=decoder_attention_mask,
-            head_mask=head_mask,
-            decoder_head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            encoder_outputs=encoder_outputs,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds if encoder_outputs is None else None,
-            decoder_inputs_embeds=decoder_inputs_embeds,
-            labels=labels,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-        )
+            outputs = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                head_mask=head_mask,
+                decoder_head_mask=decoder_head_mask,
+                cross_attn_head_mask=cross_attn_head_mask,
+                encoder_outputs=encoder_outputs,
+                past_key_values=past_key_values,
+                inputs_embeds=None,
+                decoder_inputs_embeds=decoder_inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+            )
 
         mt_loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=ot_loss.device)
         total_loss = mt_loss + self.config.ot_lambda * ot_loss
