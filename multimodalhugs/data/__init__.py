@@ -39,12 +39,13 @@ __all__ = [
 # and therefore does not require their optional dependencies — unless that
 # dataset class is explicitly accessed.
 _LAZY_DATASETS = {
-    "Pose2TextDataset":           ".datasets.pose2text",
-    "Video2TextDataset":          ".datasets.video2text",
-    "SignWritingDataset":          ".datasets.signwriting",
-    "BilingualText2TextDataset":  ".datasets.bilingual_text2text",
-    "BilingualImage2TextDataset": ".datasets.bilingual_image2text",
-    "Features2TextDataset":       ".datasets.features2text",
+    "Pose2TextDataset":             ".datasets.pose2text",
+    "Video2TextDataset":            ".datasets.video2text",
+    "VideoAudio2TextDataset":       ".datasets.videoaudio2text",
+    "SignWritingDataset":           ".datasets.signwriting",
+    "BilingualText2TextDataset":   ".datasets.bilingual_text2text",
+    "BilingualImage2TextDataset":  ".datasets.bilingual_image2text",
+    "Features2TextDataset":        ".datasets.features2text",
 }
 
 
