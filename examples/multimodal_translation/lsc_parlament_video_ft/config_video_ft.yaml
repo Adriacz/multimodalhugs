@@ -1,0 +1,99 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Experiment: Video fine-tuning with frozen domain-adapted M2M-100 backbone
+#
+# Architecture:
+#   CLIP (trainable) → VideoMapper (trainable) → merge_modalities
+#                                               → M2M encoder (frozen) → decoder (frozen)
+#
+# Baseline experiment: no OT, no audio. The M2M-100 backbone is initialised from
+# the domain fine-tuned checkpoint and kept frozen throughout. Only the video
+# encoder (CLIP) and VideoMapper learn to map frames into M2M's embedding space.
+# Gradients from the MT loss flow back through the frozen M2M encoder to the mapper.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  type: multimodal_embedder
+
+  # Video encoder — CLIP, trainable
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  feat_dim: 512
+  freeze_feature_extractor: false
+
+  # Video mapper — trainable
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  freeze_multimodal_mapper: false
+
+  # M2M-100 backbone — domain fine-tuned on LSC-Parlament, frozen
+  backbone_type: m2m_100
+  pretrained_backbone: /path/to/m2m100-lsc-finetuned   # TODO: replace
+  freeze_backbone: true
+  freeze_decoder_embed_tokens: true
+  freeze_encoder_embed_tokens: true
+  freeze_lm_head: true
+  max_length: 100
+
+setup:
+  seed: 3435
+  output_dir: /path/to/setup_dir   # TODO: replace
+
+training:
+  run_name: lsc_video_ft_frozen_backbone
+  output_dir: /path/to/checkpoints   # TODO: replace
+  logging_dir: /path/to/checkpoints
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-5
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 0.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
+
+data:
+  dataset_type: video2text
+  name: lsc_parlament
+  train_metadata_file: /path/to/train.tsv       # TODO: replace
+  validation_metadata_file: /path/to/val.tsv    # TODO: replace
+  test_metadata_file: /path/to/test.tsv         # TODO: replace
+  shuffle: true
+  max_frames: 700
+
+processor:
+  pipeline: video2text
+  tokenizer_path: /path/to/m2m100-lsc-finetuned   # TODO: replace
+  new_vocabulary: "__lsc__"
+  modality_kwargs:
+    custom_preprocessor_path: openai/clip-vit-base-patch32
+    join_chw: false
+    skip_frames_stride: 3
