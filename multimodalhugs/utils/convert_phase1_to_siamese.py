@@ -214,7 +214,11 @@ def convert(
 
     # ------------------------------------------------------------------
     # 5. Save
+    #    Some CLIP tensors are non-contiguous views; safetensors requires
+    #    contiguous memory layout before serialising.
     # ------------------------------------------------------------------
+    for param in model.parameters():
+        param.data = param.data.contiguous()
     model.save_pretrained(str(output_path))
     logger.info("Siamese checkpoint saved to %s", output_path)
     logger.info(
