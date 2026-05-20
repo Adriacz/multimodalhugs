@@ -167,6 +167,13 @@ def convert(
         audio_multimodal_mapper_activation=getattr(phase1_config, "multimodal_mapper_activation", False),
         audio_multimodal_mapper_dropout=getattr(phase1_config, "multimodal_mapper_dropout", 0.1),
         audio_freeze_multimodal_mapper=True,
+        # ── backbone freeze (Phase-2: backbone is a fixed reference) ────
+        # Override whatever Phase-1 had — Phase-1 trained the backbone,
+        # but Phase-2 keeps it frozen so only CLIP+VideoMapper are updated.
+        freeze_backbone=True,
+        freeze_decoder_embed_tokens=True,
+        freeze_encoder_embed_tokens=True,
+        freeze_lm_head=True,
         # ── OT disabled; video-only training; dual eval ───────────────
         ot_lambda=0.0,
         sinkhorn_epsilon=0.1,
@@ -194,10 +201,21 @@ def convert(
 
     missing, unexpected = model.load_state_dict(renamed_state, strict=False)
 
-    # Keys expected to be missing (fresh video branch):
+    # Keys expected to be missing:
+    #   - fresh video branch (CLIP + VideoMapper initialised from pretrained)
+    #   - M2M-100 tied embedding weights (saved once in safetensors, restored
+    #     automatically via the tie mechanism — not a real gap)
+    _tied_suffixes = (
+        "backbone.model.encoder.embed_tokens.weight",
+        "backbone.model.decoder.embed_tokens.weight",
+        "backbone.lm_head.weight",
+    )
     expected_missing_prefixes = ("feature_extractor.", "multimodal_mapper.")
-    truly_missing = [k for k in missing
-                     if not any(k.startswith(p) for p in expected_missing_prefixes)]
+    truly_missing = [
+        k for k in missing
+        if not any(k.startswith(p) for p in expected_missing_prefixes)
+        and k not in _tied_suffixes
+    ]
     if truly_missing:
         logger.warning("Unexpected missing keys after loading Phase-1 weights:\n%s",
                        "\n".join(truly_missing))
