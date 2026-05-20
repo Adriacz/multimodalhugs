@@ -234,6 +234,10 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         When ``input_frames`` is None and ``input_audio`` is provided → audio-only mode (MT loss only).
         When both are provided → Siamese training mode (OT + MT loss).
         """
+        # Video-only training: ignore audio even when present in the batch.
+        if self.training and not getattr(self.config, "train_with_audio", True):
+            input_audio = None
+
         # ── Pure-video fallback ────────────────────────────────────────────
         if input_audio is None or self.audio_feature_extractor is None:
             return super().forward(

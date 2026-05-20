@@ -1,18 +1,29 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Experiment: Video fine-tuning with frozen domain-adapted M2M-100 backbone
+# Phase 2 — Video fine-tuning with frozen audio reference (no OT)
 #
 # Architecture:
 #   CLIP (trainable) → VideoMapper (trainable) → merge_modalities
 #                                               → M2M encoder (frozen) → decoder (frozen)
 #
-# Baseline experiment: no OT, no audio. The M2M-100 backbone is initialised from
-# the domain fine-tuned checkpoint and kept frozen throughout. Only the video
-# encoder (CLIP) and VideoMapper learn to map frames into M2M's embedding space.
-# Gradients from the MT loss flow back through the frozen M2M encoder to the mapper.
+#   Whisper (frozen) → AudioMapper (frozen) → [eval only, not used in training]
+#
+# The backbone (M2M-100) and audio branch come from the Phase-1 audio checkpoint.
+# Only CLIP and VideoMapper are updated.  At each eval step the trainer reports:
+#   eval_sacrebleu       — video model performance
+#   eval_audio_sacrebleu — audio reference performance (Phase-1 frozen branch)
+#
+# Setup:
+#   Run the conversion script BEFORE mmhugs-setup / mmhugs-train:
+#
+#     mmhugs-convert-phase1 \
+#         --phase1_checkpoint /path/to/phase1/checkpoint-best \
+#         --output_dir        /path/to/phase2/siamese_init
+#
+#   Then point setup.output_dir below to the same /path/to/phase2/siamese_init.
 # ──────────────────────────────────────────────────────────────────────────────
 
 model:
-  type: multimodal_embedder
+  type: siamese_multimodal_embedder
 
   # Video encoder — CLIP, trainable
   feature_extractor_type: clip
@@ -28,9 +39,28 @@ model:
   multimodal_mapper_dropout: 0.1
   freeze_multimodal_mapper: false
 
-  # M2M-100 backbone — domain fine-tuned on LSC-Parlament, frozen
+  # Audio branch — Phase-1 reference, fully frozen
+  audio_feature_extractor_type: whisper
+  audio_pretrained_feature_extractor: openai/whisper-medium
+  audio_feat_dim: 1024
+  audio_freeze_feature_extractor: true
+  audio_multimodal_mapper_type: linear
+  audio_multimodal_mapper_layer_norm_before: true
+  audio_multimodal_mapper_layer_norm: false
+  audio_multimodal_mapper_activation: false
+  audio_multimodal_mapper_dropout: 0.1
+  audio_freeze_multimodal_mapper: true
+
+  # OT disabled — video-only training, dual eval
+  ot_lambda: 0.0
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  train_with_audio: false
+  eval_audio: true
+
+  # M2M-100 backbone — from Phase-1 checkpoint, frozen
   backbone_type: m2m_100
-  pretrained_backbone: /path/to/m2m100-lsc-finetuned   # TODO: replace
+  pretrained_backbone: /path/to/phase1/checkpoint-best   # TODO: replace (only used if re-running setup from scratch)
   freeze_backbone: true
   freeze_decoder_embed_tokens: true
   freeze_encoder_embed_tokens: true
@@ -39,12 +69,12 @@ model:
 
 setup:
   seed: 3435
-  output_dir: /path/to/setup_dir   # TODO: replace
+  output_dir: /path/to/phase2/siamese_init   # TODO: replace — must match --output_dir of mmhugs-convert-phase1
 
 training:
-  run_name: lsc_video_ft_frozen_backbone
-  output_dir: /path/to/checkpoints   # TODO: replace
-  logging_dir: /path/to/checkpoints
+  run_name: lsc_video_ft_audio_ref
+  output_dir: /path/to/phase2/checkpoints   # TODO: replace
+  logging_dir: /path/to/phase2/checkpoints
   do_train: true
   do_eval: true
   predict_with_generate: true
@@ -81,19 +111,65 @@ training:
   label_smoothing_factor: 0.1
 
 data:
-  dataset_type: video2text
-  name: lsc_parlament
-  train_metadata_file: /path/to/train.tsv       # TODO: replace
-  validation_metadata_file: /path/to/val.tsv    # TODO: replace
-  test_metadata_file: /path/to/test.tsv         # TODO: replace
+  dataset_type: videoaudio2text   # needs audio_start/audio_end columns in the TSV
+  name: lsc_parlament_video_ft
+  train_metadata_file: /path/to/train.tsv        # TODO: replace (same TSV as Phase 1)
+  validation_metadata_file: /path/to/val.tsv     # TODO: replace
+  test_metadata_file: /path/to/test.tsv          # TODO: replace
   shuffle: true
   max_frames: 700
 
 processor:
-  pipeline: video2text
-  tokenizer_path: /path/to/m2m100-lsc-finetuned   # TODO: replace
-  new_vocabulary: "__lsc__"
-  modality_kwargs:
-    custom_preprocessor_path: openai/clip-vit-base-patch32
-    join_chw: false
-    skip_frames_stride: 3
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
+
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
+
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best   # TODO: replace
+        new_vocabulary: "__lsc__"
+        role: target
+
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best   # TODO: replace
+        new_vocabulary: "__lsc__"
+        role: input
+
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best   # TODO: replace
+        new_vocabulary: "__lsc__"
+        role: input

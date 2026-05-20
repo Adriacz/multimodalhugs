@@ -35,6 +35,10 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         ot_lambda: Weight for the Sinkhorn OT loss.  0.0 disables it.
         sinkhorn_epsilon: Entropy regularization for Sinkhorn.
         sinkhorn_max_iter: Number of Sinkhorn iterations.
+        train_with_audio: When False, input_audio is ignored during the
+            training forward pass so the model trains on video only (no OT,
+            no audio branch gradient).  The audio branch remains active at
+            eval time, enabling the dual video/audio eval pass.
     """
 
     model_type = "siamese_multimodal_embedder"
@@ -59,12 +63,14 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         ot_lambda: float = 1.0,
         sinkhorn_epsilon: float = 0.1,
         sinkhorn_max_iter: int = 100,
-        # --- Eval ---
+        # --- Training / Eval ---
+        train_with_audio: bool = True,
         eval_audio: bool = True,
         **kwargs,
     ):
         super().__init__(model_type=model_type, **kwargs)
 
+        self.train_with_audio = train_with_audio
         self.audio_feature_extractor_type = audio_feature_extractor_type
         self.audio_pretrained_feature_extractor = audio_pretrained_feature_extractor
         self.audio_feat_dim = audio_feat_dim
