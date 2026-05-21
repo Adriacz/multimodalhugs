@@ -329,3 +329,108 @@ pip install -e ".[full]"
 ```
 
 Dependencias clave: `torch<2.6`, `transformers<=4.44.2`, `av` (para leer audio de mp4).
+
+---
+
+## Estrategia de entrenamiento en dos fases (branch: feature/video-ft-checkpoint)
+
+### Visión general
+
+```
+Fase 1 (HECHA):  speech2text  →  MultiModalEmbedderModel  →  checkpoint-best de audio
+                                  Whisper → Mapper → M2M (backbone domain-adapted)
+
+Fase 2 (nueva):  video2text   →  SiameseMultiModalEmbedderModel
+                                  CLIP → VideoMapper → M2M (frozen)
+                                  Whisper → AudioMapper (frozen, referencia Fase 1)
+```
+
+**Objetivo de Fase 2**: el backbone ya conoce el dominio LSC-Parlament gracias al audio.
+Entrenar CLIP + VideoMapper para que sus representaciones se ajusten al espacio del backbone.
+El audio branch frozen sirve de referencia para monitorizar si hay negative transfer.
+
+---
+
+### Nuevo flag: `train_with_audio`
+
+`SiameseMultiModalEmbedderConfig.train_with_audio: bool = True`
+
+Cuando `False`, en el `forward()` de training se ignora `input_audio` del batch aunque esté
+presente → path vídeo puro, sin OT loss, sin gradiente en la rama de audio.
+En eval (`self.training=False`) el flag no aplica, por lo que el dual eval del trainer
+funciona normal: pasada de vídeo + pasada de audio.
+
+**Por qué usar `videoaudio2text` aunque no se entrene con audio:**
+Si se usara `video2text`, los batches de eval tampoco tendrían `input_audio` y la pasada
+de audio eval quedaría sin datos. Con `videoaudio2text` los batches tienen ambas modalidades;
+el modelo los ignora en training gracias a `train_with_audio=False`.
+
+---
+
+### Script de conversión de pesos
+
+**`multimodalhugs/utils/convert_phase1_to_siamese.py`**
+CLI: `mmhugs-convert-phase1` / `multimodalhugs-convert-phase1`
+
+Renombra las keys del checkpoint de Fase 1:
+- `feature_extractor.*` → `audio_feature_extractor.*`
+- `multimodal_mapper.*` → `audio_mapper.*`
+- `backbone.*` → `backbone.*` (sin cambios)
+
+Inicializa CLIP y VideoMapper frescos (desde `openai/clip-vit-base-patch32`).
+Guarda el checkpoint siamese con `freeze_backbone=True` (y embed_tokens/lm_head también)
+forzado independientemente de lo que tuviera Fase 1.
+
+**Notas sobre los pesos missing del backbone:**
+Las keys `backbone.model.encoder.embed_tokens.weight`, `backbone.model.decoder.embed_tokens.weight`
+y `backbone.lm_head.weight` aparecen como "missing" al hacer `load_state_dict`. Es esperado:
+son pesos tied en M2M-100 (se guardan una sola vez en safetensors y se restauran
+automáticamente por el mecanismo de tying del modelo).
+
+```bash
+mmhugs-convert-phase1 \
+    --phase1_checkpoint /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best \
+    --output_dir        /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/phase2_siamese_init
+```
+
+---
+
+### YAML de Fase 2
+
+**`examples/multimodal_translation/lsc_parlament_video_ft/config_video_ft.yaml`**
+
+Puntos clave respecto al YAML de Fase 1:
+- `model.type: siamese_multimodal_embedder`
+- `train_with_audio: false` — training vídeo puro
+- `ot_lambda: 0.0` — sin OT
+- `eval_audio: true` — dual eval habilitado
+- `audio_freeze_feature_extractor: true` + `audio_freeze_multimodal_mapper: true` — rama audio completamente frozen
+- `freeze_backbone: true` + `freeze_*_embed_tokens: true` + `freeze_lm_head: true` — backbone frozen
+- `dataset_type: videoaudio2text` — necesario para que eval tenga `input_audio`
+- `tokenizer_path` → apuntar al checkpoint-best de Fase 1
+
+**Flujo completo de ejecución:**
+
+```bash
+git checkout feature/video-ft-checkpoint
+pip install -e ".[full]"
+
+# 1. Convertir checkpoint Fase 1
+mmhugs-convert-phase1 \
+    --phase1_checkpoint /path/to/phase1/checkpoint-best \
+    --output_dir        /path/to/phase2/siamese_init
+
+# 2. Setup dataset + processor (apuntar setup.output_dir al siamese_init)
+mmhugs-setup --config_path examples/multimodal_translation/lsc_parlament_video_ft/config_video_ft.yaml \
+             --output_dir /path/to/phase2/siamese_init
+
+# 3. Entrenar
+mmhugs-train --task translation \
+             --config_path examples/multimodal_translation/lsc_parlament_video_ft/config_video_ft.yaml
+```
+
+**Métricas en eval:**
+- `eval_sacrebleu` — BLEU del modelo de vídeo (lo que se está entrenando)
+- `eval_audio_sacrebleu` — BLEU de la rama de audio frozen (referencia Fase 1)
+
+Si `eval_sacrebleu` sube y `eval_audio_sacrebleu` se mantiene estable → no hay negative transfer.
