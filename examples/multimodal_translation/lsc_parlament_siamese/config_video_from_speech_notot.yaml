@@ -1,0 +1,112 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Version A — Video fine-tuning from speech checkpoint (no OT)
+#
+# Architecture (Phase 2):
+#   Video:  CLIP (trainable) → VideoMapper (trainable) → merge_modalities
+#           → M2M encoder → M2M decoder → MT loss
+#
+# Warm-start: backbone (M2M-100) weights loaded from the best speech2text
+# checkpoint via pretrained_speech_checkpoint.  No audio path is used
+# during training — the model falls back to pure video mode.
+#
+# Rationale: the speech-fine-tuned M2M decoder already knows the LSC-Parlament
+# text domain.  The video encoder learns to produce representations that this
+# decoder can translate, guided only by cross-entropy.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  type: siamese_multimodal_embedder
+
+  # Warm-start backbone from speech2text checkpoint
+  pretrained_speech_checkpoint: /path/to/speech_checkpoint_best   # TODO: replace
+
+  # Video encoder — CLIP, trainable
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  feat_dim: 512
+  freeze_feature_extractor: false
+
+  # Video mapper — trainable
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  freeze_multimodal_mapper: false
+
+  # Backbone — architecture from facebook/m2m100_418M, weights from speech checkpoint
+  backbone_type: m2m_100
+  pretrained_backbone: facebook/m2m100_418M
+  freeze_backbone: false
+  freeze_decoder_embed_tokens: false
+  freeze_encoder_embed_tokens: false
+  freeze_lm_head: false
+  max_length: 100
+
+  # No audio branch
+  audio_feature_extractor_type: null
+
+  # OT disabled (no audio branch)
+  ot_lambda: 0.0
+  eval_audio: false
+
+setup:
+  seed: 3435
+  output_dir: /path/to/setup_video_from_speech_notot   # TODO: replace
+
+training:
+  run_name: lsc_video_from_speech_notot
+  output_dir: /path/to/checkpoints_video_from_speech_notot   # TODO: replace
+  logging_dir: /path/to/checkpoints_video_from_speech_notot
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-5
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 0.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
+
+data:
+  dataset_type: video2text
+  name: lsc_parlament_video
+  train_metadata_file: /path/to/train.tsv        # TODO: replace
+  validation_metadata_file: /path/to/val.tsv     # TODO: replace
+  test_metadata_file: /path/to/test.tsv          # TODO: replace
+  shuffle: true
+  max_frames: 700
+
+processor:
+  pipeline: video2text
+  tokenizer_path: facebook/m2m100_418M
+  new_vocabulary: "__lsc__"
+  modality_kwargs:
+    custom_preprocessor_path: openai/clip-vit-base-patch32
+    join_chw: false
+    skip_frames_stride: 3
