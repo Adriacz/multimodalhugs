@@ -183,6 +183,16 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
                 gen_kwargs["max_length"] = fallback
             else:
                 gen_kwargs.pop("max_length")
+        # generate() deep-copies self.model.generation_config and uses it as the base
+        # even when gen_kwargs override individual fields.  If generation_config.max_length
+        # is None (and max_new_tokens is also None), _validate_generated_length crashes on
+        # the comparison `input_ids_length >= generation_config.max_length`.
+        if (
+            getattr(self.model.generation_config, "max_length", None) is None
+            and getattr(self.model.generation_config, "max_new_tokens", None) is None
+        ):
+            cfg_max = getattr(self.model.config, "max_length", None)
+            self.model.generation_config.max_length = cfg_max if cfg_max is not None else 200
 
         default_synced_gpus = True if is_deepspeed_zero3_enabled() else False
         gen_kwargs["synced_gpus"] = (
