@@ -1,0 +1,182 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Version C — Siamese OT at mapper output AND M2M encoder output
+#
+# Architecture (Phase 2):
+#   Video:  CLIP (trainable) → VideoMapper (trainable) → video_repr ──┐
+#                                                                       OT_mapper  (ot_lambda)
+#   Audio:  Whisper-LSC (frozen) → AudioMapper (frozen) → audio_repr ─┘
+#
+#   Video:  merge_modalities → M2M encoder → video_enc_out ───────────┐
+#                                                                       OT_encoder (ot_lambda_encoder)
+#   Audio:  merge_modalities → M2M encoder (no_grad) → audio_enc_out ─┘
+#
+#   Video backbone:  backbone(encoder_outputs=video_enc_out) → MT loss
+#   Total loss:  MT_loss + ot_lambda * OT_mapper + ot_lambda_encoder * OT_encoder
+#
+# Multi-level alignment:
+#   OT_mapper  — aligns the intermediate projected space (d_model) early in
+#                the pipeline; acts as a coarse regularisation.
+#   OT_encoder — aligns the decoder's cross-attention input space directly;
+#                the strongest signal for translation quality.
+#
+# Both OT terms are invariant to temporal position, handling the
+# audio→video lag of the sign language interpreter.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  type: siamese_multimodal_embedder
+
+  # Warm-start backbone + audio branch from speech2text checkpoint
+  pretrained_speech_checkpoint: /path/to/speech_checkpoint_best   # TODO: replace
+
+  # Video encoder — CLIP, trainable
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  feat_dim: 512
+  freeze_feature_extractor: false
+
+  # Video mapper — trainable
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  freeze_multimodal_mapper: false
+
+  # Backbone — architecture from facebook/m2m100_418M, weights from speech checkpoint
+  backbone_type: m2m_100
+  pretrained_backbone: facebook/m2m100_418M
+  freeze_backbone: false
+  freeze_decoder_embed_tokens: false
+  freeze_encoder_embed_tokens: false
+  freeze_lm_head: false
+  max_length: 100
+
+  # Audio — Whisper fine-tuned on LSC-Parlament (loaded from speech checkpoint), frozen
+  audio_feature_extractor_type: whisper
+  audio_pretrained_feature_extractor: openai/whisper-medium   # architecture only; weights from checkpoint
+  audio_feat_dim: 1024
+  audio_freeze_feature_extractor: true
+
+  # Audio mapper — loaded from speech checkpoint, frozen
+  audio_multimodal_mapper_type: linear
+  audio_multimodal_mapper_layer_norm_before: true
+  audio_multimodal_mapper_layer_norm: false
+  audio_multimodal_mapper_activation: false
+  audio_multimodal_mapper_dropout: 0.1
+  audio_freeze_multimodal_mapper: true
+
+  # OT at mapper output + encoder output
+  ot_position: both
+  ot_lambda: 1.0          # weight for OT_mapper
+  ot_lambda_encoder: 1.0  # weight for OT_encoder
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  eval_audio: true
+
+setup:
+  seed: 3435
+  output_dir: /path/to/setup_video_from_speech_ot_both   # TODO: replace
+
+training:
+  run_name: lsc_video_from_speech_ot_both
+  output_dir: /path/to/checkpoints_video_from_speech_ot_both   # TODO: replace
+  logging_dir: /path/to/checkpoints_video_from_speech_ot_both
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-5
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 0.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
+
+data:
+  dataset_type: videoaudio2text
+  name: lsc_parlament_multimodal
+  train_metadata_file: /path/to/train.tsv        # TODO: replace
+  validation_metadata_file: /path/to/val.tsv     # TODO: replace
+  test_metadata_file: /path/to/test.tsv          # TODO: replace
+  shuffle: true
+  max_frames: 700
+
+processor:
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
+
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
+
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: target
+
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
+
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
