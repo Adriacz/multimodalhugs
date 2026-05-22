@@ -308,6 +308,31 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 return_dict=return_dict,
             )
 
+        # ── OT disabled: skip audio computation in training, fall back to pure video ──
+        # Audio eval still works via _forward_audio_only (input_frames is None there).
+        if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0:
+            return super().forward(
+                input_frames=input_frames,
+                encoder_prompt=encoder_prompt,
+                encoder_prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                head_mask=head_mask,
+                decoder_head_mask=decoder_head_mask,
+                cross_attn_head_mask=cross_attn_head_mask,
+                encoder_outputs=encoder_outputs,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                decoder_inputs_embeds=decoder_inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
         # ── Audio-only mode (eval / inference) ────────────────────────────
         if input_frames is None:
             return self._forward_audio_only(
