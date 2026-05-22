@@ -104,9 +104,11 @@ multimodalhugs-train = "multimodalhugs.multimodalhugs_cli.train:main"
 multimodalhugs-setup = "multimodalhugs.multimodalhugs_cli.training_setup:main"
 multimodalhugs-generate = "multimodalhugs.multimodalhugs_cli.generate:main"
 multimodalhugs-convert-phase1 = "multimodalhugs.utils.convert_phase1_to_siamese:main"
+multimodalhugs-convert-phase1-ts = "multimodalhugs.utils.convert_phase1_to_teacher_student:main"
 
 # short aliases
 mmhugs-train = "multimodalhugs.multimodalhugs_cli.train:main"
 mmhugs-setup = "multimodalhugs.multimodalhugs_cli.training_setup:main"
 mmhugs-generate = "multimodalhugs.multimodalhugs_cli.generate:main"
 mmhugs-convert-phase1 = "multimodalhugs.utils.convert_phase1_to_siamese:main"
+mmhugs-convert-phase1-ts = "multimodalhugs.utils.convert_phase1_to_teacher_student:main"

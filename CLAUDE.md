@@ -1,4 +1,4 @@
-# MultiModalHugs — Project Notes (feature/siamese-ot-av)
+# MultiModalHugs — Project Notes (feature/audio-teacher-ot)
 
 ## Objetivo del proyecto
 
@@ -420,17 +420,152 @@ mmhugs-convert-phase1 \
     --phase1_checkpoint /path/to/phase1/checkpoint-best \
     --output_dir        /path/to/phase2/siamese_init
 
-# 2. Setup dataset + processor (apuntar setup.output_dir al siamese_init)
-mmhugs-setup --config_path examples/multimodal_translation/lsc_parlament_video_ft/config_video_ft.yaml \
-             --output_dir /path/to/phase2/siamese_init
+# 2. Añadir model_name_or_path al YAML (sección model:) apuntando al siamese_init
+#    OBLIGATORIO — sin esto el trainer carga el model equivocado
+#    model:
+#      model_name_or_path: /path/to/phase2/siamese_init
+#      type: siamese_multimodal_embedder
+#      ...
 
-# 3. Entrenar
+# 3. Setup SOLO dataset + processor — NUNCA con --do_model
+#    mmhugs-setup sin flags reconstruye el modelo desde cero y sobreescribe
+#    setup/model/config.json con defaults incorrectos (audio_feature_extractor_type: null,
+#    ot_lambda: 1.0, train_with_audio: true), rompiendo el eval de audio.
+mmhugs-setup --config_path /path/to/config_video_ft.yaml \
+             --do_dataset \
+             --do_processor
+
+# 4. Verificar que actors_paths.yaml NO tiene model_name_or_path
+#    cat /path/to/siamese_init/setup/actors_paths.yaml
+#    → solo debe tener processor_name_or_path y dataset_dir
+
+# 5. Entrenar
 mmhugs-train --task translation \
-             --config_path examples/multimodal_translation/lsc_parlament_video_ft/config_video_ft.yaml
+             --config_path /path/to/config_video_ft.yaml
 ```
+
+**Por qué NO usar `mmhugs-setup` sin `--do_dataset --do_processor`:**
+`setup_utils.py:build_and_save_model()` llama a `model_cls.build_model()` que crea un
+`SiameseMultiModalEmbedderModel` fresco con los defaults del config, ignorando los valores
+correctos del checkpoint convertido. Esto sobreescribe `setup/model/config.json` con
+`audio_feature_extractor_type: null` → `_init_audio_branch` no inicializa Whisper →
+la condición en `evaluate()` falla → no aparece `eval_audio_sacrebleu`.
+
+**Flags `--do_dataset` / `--do_processor` / `--do_model`:**
+Definidos en `SetupArguments` (`training_setup/setup_configuration_classes.py`).
+Si no se especifica ninguno, el comportamiento por defecto activa los tres (all=True).
+Para Fase 2 siempre usar `--do_dataset --do_processor` solamente.
 
 **Métricas en eval:**
 - `eval_sacrebleu` — BLEU del modelo de vídeo (lo que se está entrenando)
 - `eval_audio_sacrebleu` — BLEU de la rama de audio frozen (referencia Fase 1)
 
 Si `eval_sacrebleu` sube y `eval_audio_sacrebleu` se mantiene estable → no hay negative transfer.
+
+---
+
+## Branch: feature/audio-teacher-ot — Teacher-Student con OT en dos puntos
+
+### Visión general
+
+```
+Teacher (frozen, Phase-1 checkpoint — Whisper+AudioMapper+M2M entrenado en LSC-Parlament):
+    input_audio → FE → Mapper → [mapper_repr_T]
+                               → merge_modalities → M2M encoder → [encoder_repr_T]
+
+Student (trainable — CLIP + VideoMapper + M2M backbone init desde Phase-1):
+    input_frames → FE → Mapper → [mapper_repr_S]
+                                → merge_modalities → M2M encoder+decoder → MT loss
+                                                   → [encoder_repr_S]
+
+OT losses (solo training):
+    ot_mapper  = Sinkhorn(mapper_repr_S,  mapper_repr_T)   ← d_model space, antes de merge
+    ot_encoder = Sinkhorn(encoder_repr_S, encoder_repr_T)  ← d_model space, tras M2M encoder
+
+Total = MT_loss + ot_lambda_mapper * ot_mapper + ot_lambda_encoder * ot_encoder
+```
+
+**Por qué el teacher sabe del parlament**: el teacher ES el checkpoint de Phase-1, entrenado
+sobre LSC-Parlament audio→Catalan. Su AudioMapper y M2M backbone conocen el dominio.
+A diferencia de la branch siamese anterior que usaba Whisper genérico frozen.
+
+### Diferencias clave respecto a feature/video-ft-checkpoint
+
+| Aspecto | video-ft-checkpoint | audio-teacher-ot |
+|---------|---------------------|-----------------|
+| Teacher | Whisper genérico frozen (dentro del siamese) | Phase-1 checkpoint completo como modelo separado |
+| OT | Solo en mapper output | Mapper output + M2M encoder output |
+| Teacher weights en checkpoint | Guardados (audio branch del siamese) | **No guardados** — cargados desde `teacher_model_path` |
+| Modelo student | SiameseMultiModalEmbedderModel | AudioTeacherVideoStudentModel |
+
+### Nuevo fichero: modelo
+
+**`multimodalhugs/models/audio_teacher_video_student/`**
+
+`configuration_audio_teacher_video_student.py` — extiende `MultiModalEmbedderConfig` con:
+- `teacher_model_path`: path al checkpoint Phase-1 (cargado en runtime, no guardado)
+- `ot_lambda_mapper`: peso OT en mapper output (default 1.0)
+- `ot_lambda_encoder`: peso OT en encoder output (default 1.0)
+- `sinkhorn_epsilon`, `sinkhorn_max_iter`: parámetros Sinkhorn
+
+`modeling_audio_teacher_video_student.py`:
+- `state_dict()`: override que excluye `teacher_model.*` del checkpoint guardado
+- `_keys_to_ignore_on_load_missing = [r"^teacher_model\."]`: suprime warnings al cargar
+- `forward()` en training con audio: OT_mapper + OT_encoder + MT_loss
+- `forward()` en eval o sin audio: delega al padre (vídeo puro)
+- `prepare_inputs_for_generation()`: elimina `input_audio` antes de delegar al padre
+
+### Script de conversión
+
+**`multimodalhugs/utils/convert_phase1_to_teacher_student.py`**
+CLI: `mmhugs-convert-phase1-ts`
+
+1. Lee config de Phase-1
+2. Crea `AudioTeacherVideoStudentConfig` con CLIP fresco y `teacher_model_path` apuntando al checkpoint Phase-1
+3. Inicializa el student (CLIP fresco, backbone desde Phase-1 config)
+4. Carga solo `backbone.*` weights del checkpoint Phase-1 en el student
+5. Guarda el student (sin pesos del teacher)
+
+### Curriculum de entrenamiento
+
+- **Stage 1**: `freeze_feature_extractor: true` — CLIP frozen, VideoMapper+backbone entrenan
+- **Stage 2**: `freeze_feature_extractor: false` — CLIP se descongela (LR más bajo recomendado)
+
+Para Stage 2: modificar `config.json` del mejor checkpoint de Stage 1 y reiniciar.
+
+### Flujo completo de ejecución
+
+```bash
+git checkout feature/audio-teacher-ot
+pip install -e ".[full]"
+
+# 1. Convertir Phase-1 → student init
+mmhugs-convert-phase1-ts \
+    --phase1_checkpoint /path/to/phase1/checkpoint-best \
+    --output_dir        /path/to/teacher_student_init
+
+# 2. Editar config_teacher_student.yaml:
+#    model.model_name_or_path: /path/to/teacher_student_init
+#    model.teacher_model_path: /path/to/phase1/checkpoint-best
+
+# 3. Setup solo dataset + processor
+mmhugs-setup --config_path config_teacher_student.yaml \
+             --do_dataset \
+             --do_processor
+
+# 4. Entrenar (Stage 1 — CLIP frozen)
+mmhugs-train --task translation \
+             --config_path config_teacher_student.yaml
+
+# Stage 2: editar freeze_feature_extractor en setup/model/config.json → false
+# y reiniciar desde el best checkpoint de Stage 1
+```
+
+### Notas importantes
+
+- El teacher se carga **en tiempo de init** desde `teacher_model_path`. Si el path cambia
+  o el checkpoint se mueve, actualizar `config.teacher_model_path` en `config.json`.
+- Los pesos del teacher ocupan ~1.5GB extra de VRAM durante training (Whisper+M2M encoder).
+- `dataset_type: videoaudio2text` es necesario para que el batch tenga `input_audio`.
+- Durante eval y generate, el teacher no se usa — solo forward vídeo del student.
+- `eval_sacrebleu` es el BLEU del student de vídeo (la única métrica relevante aquí).

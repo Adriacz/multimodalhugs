@@ -1,0 +1,6 @@
+from .modeling_audio_teacher_video_student import AudioTeacherVideoStudentModel
+from .configuration_audio_teacher_video_student import AudioTeacherVideoStudentConfig
+
+MODEL_CLASS = AudioTeacherVideoStudentModel
+CONFIG_CLASS = AudioTeacherVideoStudentConfig
+CONFIG_NAME = "audio_teacher_video_student"

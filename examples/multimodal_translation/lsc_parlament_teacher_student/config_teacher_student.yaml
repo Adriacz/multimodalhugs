@@ -1,0 +1,164 @@
+# AudioTeacherVideoStudentModel — LSC-Parlament
+#
+# Teacher: Phase-1 audio MultiModalEmbedderModel (Whisper + AudioMapper + M2M)
+#          trained on LSC-Parlament speech→Catalan.  Loaded frozen at runtime.
+# Student: CLIP + VideoMapper + M2M backbone (backbone init from Phase-1).
+#
+# OT at two alignment points:
+#   1. Mapper output — VideoMapper repr vs AudioMapper repr (d_model space)
+#   2. Encoder output — student M2M encoder repr vs teacher M2M encoder repr
+#
+# Training curriculum:
+#   Stage 1: freeze_feature_extractor: true   (CLIP frozen, only mapper+backbone train)
+#   Stage 2: freeze_feature_extractor: false  (CLIP unfrozen, lower LR)
+#            Change this flag in setup/model/config.json and restart from Stage-1 best.
+#
+# Setup workflow (IMPORTANT):
+#   1.  mmhugs-convert-phase1-ts \
+#         --phase1_checkpoint /path/to/phase1/checkpoint-best \
+#         --output_dir        /path/to/teacher_student_init
+#
+#   2.  Set model.model_name_or_path below to /path/to/teacher_student_init
+#
+#   3.  mmhugs-setup --config_path config_teacher_student.yaml \
+#                    --do_dataset --do_processor
+#       (NEVER use without --do_dataset --do_processor: would overwrite config.json)
+#
+#   4.  mmhugs-train --task translation \
+#                    --config_path config_teacher_student.yaml
+
+model:
+  model_name_or_path: /path/to/teacher_student_init   # SET THIS after convert
+  type: audio_teacher_video_student
+  # --- Video branch ---
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  feat_dim: 512
+  freeze_feature_extractor: true          # Stage 1: frozen. Set false for Stage 2.
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  freeze_multimodal_mapper: false
+  # --- Backbone (frozen — Phase-1 M2M anchors the representation space) ---
+  backbone_type: m2m_100
+  freeze_backbone: true
+  freeze_decoder_embed_tokens: true
+  freeze_encoder_embed_tokens: true
+  freeze_lm_head: true
+  max_length: 100
+  # --- Teacher ---
+  teacher_model_path: /path/to/phase1/checkpoint-best  # SET THIS
+  # --- OT ---
+  ot_lambda_mapper: 1.0
+  ot_lambda_encoder: 1.0
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+
+setup:
+  seed: 3435
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_teacher_student/
+
+training:
+  run_name: parlament_teacher_student_ot
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_teacher_student
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_teacher_student
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-05
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 0.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
+
+data:
+  dataset_type: videoaudio2text      # provides both input_frames and input_audio
+  name: lsc_parlament_teacher_student
+  train_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/train.tsv
+  validation_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/validation.tsv
+  test_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/test.tsv
+  shuffle: true
+  max_frames: 700
+
+processor:
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
+
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
+
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best  # SET THIS (same tokenizer)
+        new_vocabulary: "__lsc__"
+        role: target
+
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best  # SET THIS
+        new_vocabulary: "__lsc__"
+        role: input
+
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: /path/to/phase1/checkpoint-best  # SET THIS
+        new_vocabulary: "__lsc__"
+        role: input
