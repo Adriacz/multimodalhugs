@@ -1,24 +1,32 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Version A — Video fine-tuning from speech checkpoint (no OT)
 #
-# Architecture (Phase 2):
+# Architecture (Phase 2 — training):
 #   Video:  CLIP (trainable) → VideoMapper (trainable) → merge_modalities
-#           → M2M encoder → M2M decoder → MT loss
+#           → M2M encoder → M2M decoder → MT loss only
 #
-# Warm-start: backbone (M2M-100) weights loaded from the best speech2text
-# checkpoint via pretrained_speech_checkpoint.  No audio path is used
-# during training — the model falls back to pure video mode.
+# Architecture (Phase 2 — eval, audio pass):
+#   Audio:  Whisper-LSC (frozen) → AudioMapper (frozen) → merge_modalities
+#           → M2M encoder → M2M decoder → sacrebleu/chrf (eval_audio_*)
 #
-# Rationale: the speech-fine-tuned M2M decoder already knows the LSC-Parlament
-# text domain.  The video encoder learns to produce representations that this
-# decoder can translate, guided only by cross-entropy.
+# Warm-start: backbone (M2M-100) + Whisper + AudioMapper weights loaded from
+# the best speech2text checkpoint via pretrained_speech_checkpoint.
+#
+# During training: ot_lambda=0.0 → audio path is skipped entirely (no compute
+# overhead). Audio branch kept in memory only for the audio eval pass.
+#
+# Dual eval at each eval_steps:
+#   eval_sacrebleu / eval_chrf        → video generation
+#   eval_audio_sacrebleu / eval_audio_chrf → audio generation (speech checkpoint)
 # ──────────────────────────────────────────────────────────────────────────────
 
 model:
   type: siamese_multimodal_embedder
 
-  # Warm-start backbone from speech2text checkpoint
-  pretrained_speech_checkpoint: /path/to/speech_checkpoint_best   # TODO: replace
+  # Warm-start backbone + audio branch from speech2text checkpoint
+  # Verifica: pot ser l'arrel de checkpoints_speech_v5 o un subdirectori checkpoint-XXXXX
+  # Comprova amb: ls /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/
+  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5
 
   # Video encoder — CLIP, trainable
   feature_extractor_type: clip
@@ -43,21 +51,39 @@ model:
   freeze_lm_head: false
   max_length: 100
 
-  # No audio branch
-  audio_feature_extractor_type: null
+  # Audio — Whisper fine-tuned on LSC-Parlament (loaded from speech checkpoint), frozen
+  # Used only for the audio eval pass; skipped entirely during training (ot_lambda=0)
+  audio_feature_extractor_type: whisper
+  audio_pretrained_feature_extractor: openai/whisper-medium   # architecture only; weights from checkpoint
+  audio_feat_dim: 1024
+  audio_freeze_feature_extractor: true
 
-  # OT disabled (no audio branch)
+  # Audio mapper — loaded from speech checkpoint, frozen
+  audio_multimodal_mapper_type: linear
+  audio_multimodal_mapper_layer_norm_before: true
+  audio_multimodal_mapper_layer_norm: false
+  audio_multimodal_mapper_activation: false
+  audio_multimodal_mapper_dropout: 0.1
+  audio_freeze_multimodal_mapper: true
+
+  # OT disabled — audio path skipped during training
   ot_lambda: 0.0
-  eval_audio: false
+  ot_lambda_encoder: 0.0
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  ot_position: mapper
+
+  # Dual eval: video + audio
+  eval_audio: true
 
 setup:
   seed: 3435
-  output_dir: /path/to/setup_video_from_speech_notot   # TODO: replace
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_video_from_speech_notot
 
 training:
   run_name: lsc_video_from_speech_notot
-  output_dir: /path/to/checkpoints_video_from_speech_notot   # TODO: replace
-  logging_dir: /path/to/checkpoints_video_from_speech_notot
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_video_from_speech_notot
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_video_from_speech_notot
   do_train: true
   do_eval: true
   predict_with_generate: true
@@ -94,19 +120,65 @@ training:
   label_smoothing_factor: 0.1
 
 data:
-  dataset_type: video2text
+  dataset_type: videoaudio2text
   name: lsc_parlament_video
-  train_metadata_file: /path/to/train.tsv        # TODO: replace
-  validation_metadata_file: /path/to/val.tsv     # TODO: replace
-  test_metadata_file: /path/to/test.tsv          # TODO: replace
+  train_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/train.tsv
+  validation_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/validation.tsv
+  test_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/test.tsv
   shuffle: true
   max_frames: 700
 
 processor:
-  pipeline: video2text
-  tokenizer_path: facebook/m2m100_418M
-  new_vocabulary: "__lsc__"
-  modality_kwargs:
-    custom_preprocessor_path: openai/clip-vit-base-patch32
-    join_chw: false
-    skip_frames_stride: 3
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
+
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
+
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: target
+
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
+
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
