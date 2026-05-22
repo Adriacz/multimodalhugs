@@ -178,7 +178,11 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         if "num_beams" in gen_kwargs and gen_kwargs["num_beams"] is None:
             gen_kwargs.pop("num_beams")
         if "max_length" in gen_kwargs and gen_kwargs["max_length"] is None:
-            gen_kwargs.pop("max_length")
+            fallback = getattr(self.model.config, "max_length", None)
+            if fallback is not None:
+                gen_kwargs["max_length"] = fallback
+            else:
+                gen_kwargs.pop("max_length")
 
         default_synced_gpus = True if is_deepspeed_zero3_enabled() else False
         gen_kwargs["synced_gpus"] = (
@@ -240,7 +244,7 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         elif self.generation_config.max_new_tokens is not None: 
             if generated_tokens.shape[-1] < self.generation_config.max_new_tokens + 1:
                 generated_tokens = self._pad_tensors_to_max_len(generated_tokens, self.generation_config.max_new_tokens + 1)
-        elif generated_tokens.shape[-1] < self.generation_config.max_length:
+        elif self.generation_config.max_length is not None and generated_tokens.shape[-1] < self.generation_config.max_length:
             generated_tokens = self._pad_tensors_to_max_len(generated_tokens, self.generation_config.max_length)
 
         with torch.no_grad():
@@ -264,7 +268,7 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             elif self.generation_config.max_new_tokens is not None:
                 if labels.shape[-1] < self.generation_config.max_new_tokens + 1:
                     labels = self._pad_tensors_to_max_len(labels, self.generation_config.max_new_tokens + 1)
-            elif labels.shape[-1] < self.generation_config.max_length:
+            elif self.generation_config.max_length is not None and labels.shape[-1] < self.generation_config.max_length:
                 labels = self._pad_tensors_to_max_len(labels, self.generation_config.max_length)
         else:
             labels = None
