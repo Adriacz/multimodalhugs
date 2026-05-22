@@ -56,6 +56,56 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
     # Initialisation
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Speech checkpoint warm-start
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def build_model(cls, **kwargs):
+        """Build model then optionally load backbone + audio weights from a speech checkpoint."""
+        model = super().build_model(**kwargs)
+        if getattr(model.config, "pretrained_speech_checkpoint", None):
+            model._load_from_speech_checkpoint(model.config.pretrained_speech_checkpoint)
+        return model
+
+    def _load_from_speech_checkpoint(self, path: str) -> None:
+        """Load backbone + audio branch weights from a MultiModalEmbedder speech2text checkpoint.
+
+        Key remapping applied to the speech checkpoint state dict:
+          feature_extractor.*  → audio_feature_extractor.*
+          multimodal_mapper.*  → audio_mapper.*
+          backbone.*           → backbone.*   (unchanged)
+
+        Uses strict=False so keys absent from this model (e.g. audio branch keys
+        when audio_feature_extractor_type is None) are silently ignored.
+        """
+        from multimodalhugs.models.multimodal_embedder.modeling_multimodal_embedder import MultiModalEmbedderModel
+
+        logger.info("Loading weights from speech checkpoint: %s", path)
+        speech_model = MultiModalEmbedderModel.from_pretrained(path)
+        raw_state = {k: v.clone() for k, v in speech_model.state_dict().items()}
+        del speech_model
+
+        remapped: dict = {}
+        for key, val in raw_state.items():
+            if key.startswith("feature_extractor."):
+                remapped["audio_feature_extractor." + key[len("feature_extractor."):]] = val
+            elif key.startswith("multimodal_mapper."):
+                remapped["audio_mapper." + key[len("multimodal_mapper."):]] = val
+            else:
+                remapped[key] = val
+
+        missing, unexpected = self.load_state_dict(remapped, strict=False)
+        n_loaded = len(remapped) - len(unexpected)
+        logger.info(
+            "Speech checkpoint loaded — %d weights applied, %d missing, %d unexpected",
+            n_loaded, len(missing), len(unexpected),
+        )
+
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
     def _init_audio_branch(self, config: SiameseMultiModalEmbedderConfig):
         if config.audio_feature_extractor_type is None:
             self.audio_feature_extractor = None
@@ -282,6 +332,10 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
 
         # ── Audio + video training path ────────────────────────────────────
         if encoder_outputs is None:
+            ot_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+            ot_mapper_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+            ot_encoder_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+
             if labels is not None:
                 decoder_input_ids = None
                 decoder_attention_mask = None
@@ -324,7 +378,6 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
 
             if self.config.ot_position == "encoder":
                 # ── OT at M2M encoder output ───────────────────────────────
-                # merge_modalities for video, then run backbone encoder explicitly
                 if inputs_embeds is None:
                     inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
                     input_ids = None
@@ -343,7 +396,6 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                     attention_mask=attention_mask,
                 )
 
-                # merge_modalities for audio + backbone encoder (no_grad: backbone frozen)
                 with torch.no_grad():
                     audio_inputs_embeds, audio_enc_attn = merge_modalities(
                         x=audio_repr,
@@ -368,7 +420,78 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                     max_iter=self.config.sinkhorn_max_iter,
                 )
 
-                # Full backbone forward with cached video encoder output
+                outputs = self.backbone(
+                    input_ids=None,
+                    attention_mask=attention_mask,
+                    decoder_input_ids=decoder_input_ids,
+                    decoder_attention_mask=decoder_attention_mask,
+                    head_mask=head_mask,
+                    decoder_head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    encoder_outputs=video_enc_out,
+                    past_key_values=past_key_values,
+                    inputs_embeds=None,
+                    decoder_inputs_embeds=decoder_inputs_embeds,
+                    labels=labels,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                )
+
+            elif self.config.ot_position == "both":
+                # ── OT at mapper output AND at M2M encoder output ──────────
+                ot_mapper_loss = batch_sinkhorn_loss(
+                    x=inputs_embeds,
+                    y=audio_repr,
+                    x_mask=attention_mask,
+                    y_mask=audio_mask,
+                    epsilon=self.config.sinkhorn_epsilon,
+                    max_iter=self.config.sinkhorn_max_iter,
+                )
+
+                if inputs_embeds is None:
+                    inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
+                    input_ids = None
+
+                inputs_embeds, attention_mask = merge_modalities(
+                    x=inputs_embeds,
+                    padding_mask=attention_mask,
+                    prompt=encoder_prompt,
+                    prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                    embeddings_module=self.get_backbone_encoder.embed_tokens,
+                    pad_idx=self.pad_token_id,
+                    eos_idx=self.eos_token_id,
+                )
+                video_enc_out = self.get_backbone_encoder(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                )
+
+                with torch.no_grad():
+                    audio_inputs_embeds, audio_enc_attn = merge_modalities(
+                        x=audio_repr,
+                        padding_mask=audio_mask,
+                        prompt=encoder_prompt,
+                        prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                        embeddings_module=self.get_backbone_encoder.embed_tokens,
+                        pad_idx=self.pad_token_id,
+                        eos_idx=self.eos_token_id,
+                    )
+                    audio_enc_out = self.get_backbone_encoder(
+                        inputs_embeds=audio_inputs_embeds,
+                        attention_mask=audio_enc_attn,
+                    )
+
+                ot_encoder_loss = batch_sinkhorn_loss(
+                    x=video_enc_out.last_hidden_state,
+                    y=audio_enc_out.last_hidden_state,
+                    x_mask=attention_mask,
+                    y_mask=audio_enc_attn,
+                    epsilon=self.config.sinkhorn_epsilon,
+                    max_iter=self.config.sinkhorn_max_iter,
+                )
+
                 outputs = self.backbone(
                     input_ids=None,
                     attention_mask=attention_mask,
@@ -399,7 +522,6 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                     max_iter=self.config.sinkhorn_max_iter,
                 )
 
-                # --- Video continues: merge_modalities + Backbone ---
                 if inputs_embeds is None:
                     inputs_embeds = self.get_backbone_encoder.embed_tokens(input_ids)
                     input_ids = None
@@ -446,6 +568,8 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 eos_idx=self.eos_token_id,
             )
             ot_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+            ot_mapper_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+            ot_encoder_loss = torch.tensor(0.0, device=next(self.parameters()).device)
 
             outputs = self.backbone(
                 input_ids=input_ids,
@@ -466,8 +590,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 return_dict=True,
             )
 
-        mt_loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=ot_loss.device)
-        total_loss = mt_loss + self.config.ot_lambda * ot_loss
+        mt_loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=next(self.parameters()).device)
+        if self.config.ot_position == "both":
+            total_loss = mt_loss + self.config.ot_lambda * ot_mapper_loss + self.config.ot_lambda_encoder * ot_encoder_loss
+        else:
+            total_loss = mt_loss + self.config.ot_lambda * ot_loss
 
         if not (return_dict if return_dict is not None else True):
             output = (outputs.logits,) + outputs[1:]
