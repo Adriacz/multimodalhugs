@@ -309,8 +309,9 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             )
 
         # ── OT disabled: skip audio computation in training, fall back to pure video ──
-        # Audio eval still works via _forward_audio_only (input_frames is None there).
-        if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0:
+        # Only skip when input_frames is present (training); audio-only calls
+        # (input_frames=None) must fall through to _forward_audio_only below.
+        if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0 and input_frames is not None:
             return super().forward(
                 input_frames=input_frames,
                 encoder_prompt=encoder_prompt,
