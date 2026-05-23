@@ -23,7 +23,7 @@ model:
   type: siamese_multimodal_embedder
 
   # Warm-start backbone + audio branch from speech2text checkpoint
-  pretrained_speech_checkpoint: /path/to/speech_checkpoint_best   # TODO: replace
+  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best
 
   # Video encoder — CLIP, trainable
   feature_extractor_type: clip
@@ -71,12 +71,12 @@ model:
 
 setup:
   seed: 3435
-  output_dir: /path/to/setup_video_from_speech_ot_mapper   # TODO: replace
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_video_from_speech_ot_mapper
 
 training:
   run_name: lsc_video_from_speech_ot_mapper
-  output_dir: /path/to/checkpoints_video_from_speech_ot_mapper   # TODO: replace
-  logging_dir: /path/to/checkpoints_video_from_speech_ot_mapper
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_video_from_speech_ot_mapper
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_video_from_speech_ot_mapper
   do_train: true
   do_eval: true
   predict_with_generate: true
@@ -115,9 +115,9 @@ training:
 data:
   dataset_type: videoaudio2text
   name: lsc_parlament_multimodal
-  train_metadata_file: /path/to/train.tsv        # TODO: replace
-  validation_metadata_file: /path/to/val.tsv     # TODO: replace
-  test_metadata_file: /path/to/test.tsv          # TODO: replace
+  train_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/train.tsv
+  validation_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/validation.tsv
+  test_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/test.tsv
   shuffle: true
   max_frames: 700
 

@@ -26,7 +26,7 @@ model:
   # Warm-start backbone + audio branch from speech2text checkpoint
   # Verifica: pot ser l'arrel de checkpoints_speech_v5 o un subdirectori checkpoint-XXXXX
   # Comprova amb: ls /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/
-  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5
+  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best
 
   # Video encoder — CLIP, trainable
   feature_extractor_type: clip
