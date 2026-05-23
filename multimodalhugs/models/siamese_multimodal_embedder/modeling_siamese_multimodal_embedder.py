@@ -270,24 +270,15 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 eos_idx=self.eos_token_id,
             )
         else:
-            # Cached encoder outputs: reconstruct attention_mask to full length.
-            if attention_mask is None:
-                B = encoder_outputs[0].shape[0]
-                T = encoder_outputs[0].shape[1]
-                attention_mask = torch.ones(
-                    (B, T), dtype=torch.long, device=encoder_outputs[0].device
-                )
-            else:
-                if isinstance(self.audio_mapper, MultimodalMapper):
-                    attention_mask = self.audio_mapper.mask_correction(attention_mask)
-                attention_mask = merge_modalities_mask_correction(
-                    padding_mask=attention_mask,
-                    prompt=encoder_prompt,
-                    prompt_length_padding_mask=encoder_prompt_length_padding_mask,
-                    embeddings_module=self.get_backbone_encoder.embed_tokens,
-                    pad_idx=self.pad_token_id,
-                    eos_idx=self.eos_token_id,
-                )
+            # Cached encoder outputs: always reconstruct mask from encoder output shape.
+            # The incoming attention_mask cannot be trusted here — generate() may pass
+            # a stale short mask (e.g. encoder_prompt length) that doesn't match the
+            # full audio encoder output length, causing cross-attention to crash.
+            B = encoder_outputs[0].shape[0]
+            T = encoder_outputs[0].shape[1]
+            attention_mask = torch.ones(
+                (B, T), dtype=torch.long, device=encoder_outputs[0].device
+            )
 
         outputs = self.backbone(
             input_ids=None,
