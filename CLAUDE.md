@@ -329,3 +329,98 @@ pip install -e ".[full]"
 ```
 
 Dependencias clave: `torch<2.6`, `transformers<=4.44.2`, `av` (para leer audio de mp4).
+
+---
+
+## Notas sobre el CLI de entrenamiento (`multimodalhugs-train`)
+
+### `--setup_path` debe apuntar al directorio que contiene `actors_paths.yaml`
+El flag `--setup_path` debe ser la ruta al subdirectorio `setup/` generado por el setup, **no** al directorio padre. Ejemplo correcto:
+
+```bash
+--setup_path ~/lsc-parlament/setup_video_from_speech_noOT/setup/
+```
+
+Si `setup_path` no existe o no contiene `actors_paths.yaml`, el código cae al fallback `output_dir/setup/` y falla si tampoco existe.
+
+### `model_name_or_path` en training apunta directamente al checkpoint
+En `translation_training.py`, `resolve_checkpoint_path_from_general_setup_path` **no se llama** (solo existe en generate). El valor de `model_name_or_path` en `actors_paths.yaml` o en el YAML de config debe ser la ruta directa al checkpoint (e.g. `checkpoint-best/`), no al directorio del setup anterior.
+
+---
+
+## Experimentos de video-from-speech (Fase 2)
+
+Tres versiones, cada una en su propia rama. Todas warm-start desde el speech checkpoint.
+
+| Versión | Rama | Descripción |
+|---------|------|-------------|
+| A | `feature/video-from-speech` | Sin OT. Solo MT loss. `ot_lambda=0`. Audio branch en memoria solo para audio eval. |
+| B | `feature/video-from-speech-ot-mapper` | OT en salida del mapper. `ot_lambda=1.0`, `ot_position=mapper`. |
+| C | `feature/video-from-speech-ot-both` | OT en mapper + encoder. `ot_lambda=1.0`, `ot_lambda_encoder=1.0`, `ot_position=both`. |
+
+YAMLs en `examples/multimodal_translation/lsc_parlament_siamese/`:
+- `config_video_from_speech_notot.yaml` → Versión A
+- `config_video_from_speech_ot_mapper.yaml` → Versión B
+- `config_video_from_speech_ot_both.yaml` → Versión C
+
+Speech checkpoint de warm-start: `/home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best`
+
+---
+
+## Bugs de audio eval corregidos (mayo 2026)
+
+Ambos bugs estaban en `modeling_siamese_multimodal_embedder.py` y afectaban a las tres versiones.
+
+### Bug 1 — Crash en Version A durante audio eval (`TypeError: embedding() indices must be Tensor, not NoneType`)
+
+**Causa:** La condición de early-return para `ot_lambda=0` disparaba incluso cuando `input_frames=None` (paso de audio eval), enviando `super().forward(input_frames=None)` → el padre intentaba `embed_tokens(input_ids=None)`.
+
+**Fix:**
+```python
+# ANTES (buggy)
+if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0:
+# DESPUÉS (correcto)
+if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0 and input_frames is not None:
+```
+
+### Bug 2 — Audio eval BLEU=0 en todas las versiones durante `generate()`
+
+**Causa:** `generate()` llama `get_encoder()` → `EncoderWrapper` → `input_to_encoder_outputs()`. El wrapper filtra kwargs por la firma del método. `input_audio` no estaba en la firma del método padre → se descartaba silenciosamente → el encoder recibía inputs vacíos.
+
+**Fix:** Override de `input_to_encoder_outputs()` en `SiameseMultiModalEmbedderModel` con `input_audio` en la firma y el camino audio-only completo (AudioFE → AudioMapper → merge_modalities → encoder).
+
+### Bug 3 — Crash en audio eval durante pasos autoregressivos (`ValueError: Attention mask should be of size (1,1,2,1502) but is (1,1,2,3)`)
+
+**Causa:** `_forward_audio_only` con `encoder_outputs` cacheados tenía una rama `else` que intentaba re-aplicar `mask_correction` a la `attention_mask` entrante. Durante `generate()`, transformers reconstruye internamente un `attention_mask` de longitud del `encoder_prompt` (~3 tokens) en lugar de usar la longitud real del output del encoder (1502). Esa máscara corta llega a `_forward_audio_only`, pasa por la corrección y sale igual de corta, causando el crash en cross-attention.
+
+**Fix:** Cuando `encoder_outputs is not None`, ignorar siempre la `attention_mask` entrante y reconstruirla directamente desde `encoder_outputs[0].shape`.
+
+Los tres bugs afectan a las tres ramas (A, B, C). Los fixes 1 y 2 ya estaban pusheados. El fix 3 está en esta rama — pushear y cherry-pick a las otras dos.
+
+---
+
+## Actualizar código en el cluster (install editable)
+
+El install es editable (`pip install -e .`), así que un `git pull` es suficiente — no hay que reinstalar:
+
+```bash
+cd /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/multimodalhugs
+git fetch origin
+git checkout feature/video-from-speech && git pull        # Versión A
+git checkout feature/video-from-speech-ot-mapper && git pull  # Versión B
+git checkout feature/video-from-speech-ot-both && git pull    # Versión C
+```
+
+### Reanudar un job caído desde el último checkpoint
+
+Con `overwrite_output_dir: true` (valor por defecto en los YAMLs), el Trainer **no detecta** el último checkpoint y reinicia desde cero. Para reanudar:
+
+```yaml
+overwrite_output_dir: false   # cambiar antes de relanzar
+```
+
+O pasar explícitamente:
+```bash
+multimodalhugs-train --config_path ... \
+  --resume_from_checkpoint .../checkpoints_video_from_speech_notot/checkpoint-XXXXX
+```
