@@ -92,6 +92,77 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             )
 
     # ------------------------------------------------------------------
+    # Encoder-only path for generate() — audio or video
+    # ------------------------------------------------------------------
+
+    def input_to_encoder_outputs(
+        self,
+        input_frames: Optional[torch.Tensor] = None,
+        input_audio: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
+        encoder_prompt: Optional[torch.LongTensor] = None,
+        encoder_prompt_length_padding_mask: Optional[torch.LongTensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        """Encoder-only pass used by generate() via EncoderWrapper.
+
+        input_audio must be declared here so EncoderWrapper does not filter it
+        out before calling this method. On this branch generation always runs
+        video-only (prepare_inputs_for_generation strips audio), so the audio
+        path here is a safety net for future use.
+        """
+        if input_frames is None and input_audio is not None:
+            with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
+                audio_repr = self.audio_feature_extractor(input_audio)
+
+            B_a, T_a = audio_repr.shape[:2]
+            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+
+            if isinstance(self.audio_mapper, MultimodalMapper):
+                audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
+            elif self.audio_mapper is not None:
+                audio_repr = self.audio_mapper(audio_repr)
+
+            inputs_embeds, attention_mask = merge_modalities(
+                x=audio_repr,
+                padding_mask=audio_mask,
+                prompt=encoder_prompt,
+                prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+                embeddings_module=self.get_backbone_encoder.embed_tokens,
+                pad_idx=self.pad_token_id,
+                eos_idx=self.eos_token_id,
+            )
+
+            return self.get_backbone_encoder(
+                input_ids=None,
+                attention_mask=attention_mask,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict if return_dict is not None else True,
+            )
+
+        return super().input_to_encoder_outputs(
+            input_frames=input_frames,
+            encoder_prompt=encoder_prompt,
+            encoder_prompt_length_padding_mask=encoder_prompt_length_padding_mask,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
