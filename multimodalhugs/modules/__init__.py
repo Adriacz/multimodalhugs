@@ -5,3 +5,4 @@ from .feature_extractor import FeatureExtractor, get_feature_extractor_class
 from .custom_embedding import CustomEmbedding
 from .special_tokens_embeddings import SpecialTokensEmbeddings
 from .sinkhorn import sinkhorn_loss, batch_sinkhorn_loss
+from .retrieval_metrics import cross_modal_retrieval

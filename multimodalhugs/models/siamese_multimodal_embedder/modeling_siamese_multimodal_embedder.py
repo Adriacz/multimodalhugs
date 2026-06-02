@@ -722,6 +722,54 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             encoder_attentions=outputs.encoder_attentions,
         )
 
+    # Embedding extraction for space-alignment evaluation
+
+    @torch.no_grad()
+    def extract_embeddings(
+        self,
+        input_frames: torch.Tensor,
+        input_audio: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        **Extract mean-pooled video and audio embeddings from the mapper outputs.**
+
+        Runs both modalities through their respective feature extractors and mappers,
+        then mean-pools over the time dimension (valid frames only).
+        Gradients are disabled; safe to call during eval without wrapping in ``torch.no_grad()``.
+
+        **Args:**
+        - `input_frames` (torch.Tensor): `[B, T_v, C, H, W]` — video frames.
+        - `input_audio` (torch.Tensor): `[B, n_mels, T_a]` — audio mel-spectrogram.
+        - `attention_mask` (Optional[torch.Tensor]): `[B, T_v]` video mask (1 = valid). Inferred as all-ones if None.
+
+        **Returns:**
+        - `video_emb` (torch.Tensor): `[B, D]` mean-pooled video embedding.
+        - `audio_emb` (torch.Tensor): `[B, D]` mean-pooled audio embedding.
+        """
+        # Video branch
+        video_repr = self.feature_extractor(input_frames) if self.feature_extractor else input_frames
+        B, T_v = video_repr.shape[:2]
+        if attention_mask is None:
+            attention_mask = torch.ones((B, T_v), dtype=torch.long, device=video_repr.device)
+        if self.multimodal_mapper is not None:
+            video_repr, attention_mask = self.multimodal_mapper(video_repr, attention_mask)
+
+        # Audio branch
+        audio_repr = self.audio_feature_extractor(input_audio)
+        B_a, T_a = audio_repr.shape[:2]
+        audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+        if isinstance(self.audio_mapper, MultimodalMapper):
+            audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
+        elif self.audio_mapper is not None:
+            audio_repr = self.audio_mapper(audio_repr)
+
+        def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            mask_f = mask.unsqueeze(-1).float()
+            return (x * mask_f).sum(1) / mask_f.sum(1).clamp(min=1.0)
+
+        return _masked_mean(video_repr, attention_mask), _masked_mean(audio_repr, audio_mask)
+
     # Generation — video-only or audio-only depending on which input is present
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
