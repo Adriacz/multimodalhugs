@@ -1,59 +1,48 @@
+# Standard Library Imports
 from typing import Optional
 
+# Local Application Imports
 from multimodalhugs.models.multimodal_embedder.configuration_multimodal_embedder import MultiModalEmbedderConfig
 
 
 class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
     """
-    Configuration for SiameseMultiModalEmbedderModel.
+    **SiameseMultiModalEmbedderConfig: Configuration for SiameseMultiModalEmbedderModel.**
 
-    Extends MultiModalEmbedderConfig with a second (audio) feature extractor,
-    an audio-specific MultimodalMapper, and Optimal Transport alignment params.
+    Extends ``MultiModalEmbedderConfig`` with a second (audio) feature extractor,
+    an audio-specific MultimodalMapper, and Optimal Transport alignment parameters.
 
     Video pathway (unchanged from parent):
-        FeatureExtractor → MultimodalMapper → [merge_modalities →] Backbone
+        FeatureExtractor → MultimodalMapper → merge_modalities → Backbone
 
     Audio pathway (added):
-        AudioFeatureExtractor → AudioMultimodalMapper → OT loss (then discarded)
+        AudioFeatureExtractor → AudioMultimodalMapper → OT loss
 
-    OT can be applied at two positions, controlled by ``ot_position``:
-        ``"mapper"``  — between video_repr and audio_repr after their mappers
-                        (d_model space, before merge_modalities / backbone encoder).
-        ``"encoder"`` — between the M2M encoder outputs of both modalities
-                        (backbone encoder is run explicitly for both paths;
-                        audio encoder pass uses no_grad since backbone is frozen).
+    OT position is controlled by ``ot_position``:
+        ``"mapper"``  — OT between mapper outputs, before merge_modalities.
+        ``"encoder"`` — OT between M2M encoder outputs (audio pass uses no_grad).
+        ``"both"``    — OT at mapper output and encoder output simultaneously.
 
-    Args:
-        audio_feature_extractor_type: Type string for the audio encoder,
-            e.g. ``"whisper"``.  When None the audio branch is disabled.
-        audio_pretrained_feature_extractor: HF model ID or local path,
-            e.g. ``"openai/whisper-medium"``.
-        audio_feat_dim: Output dim of the audio feature extractor.
-            Whisper-medium → 1024.
-        audio_freeze_feature_extractor: Freeze the audio encoder weights.
-        audio_multimodal_mapper_type: Mapper type for the audio branch —
-            one of ``{"linear", "adapter", "cnn_adapter"}``.
-        audio_multimodal_mapper_layer_norm_before: LayerNorm before mapper.
-        audio_multimodal_mapper_layer_norm: LayerNorm inside mapper.
-        audio_multimodal_mapper_activation: ReLU at mapper output.
-        audio_multimodal_mapper_factor: Overparameterization factor (adapter).
-        audio_multimodal_mapper_dropout: Dropout in the audio mapper.
-        audio_freeze_multimodal_mapper: Freeze audio mapper weights.
-        pretrained_speech_checkpoint: Path to a MultiModalEmbedder speech2text checkpoint.
-            When set, backbone weights are loaded from this checkpoint (overriding
-            ``pretrained_backbone``), and — if the audio branch is enabled — the
-            audio feature extractor and audio mapper weights are also loaded from the
-            checkpoint's ``feature_extractor`` and ``multimodal_mapper`` keys respectively.
-            Intended for Phase 2 video training that warm-starts from a Phase 1 speech model.
-        ot_lambda: Weight for the Sinkhorn OT loss applied at the mapper or encoder output.
-            When ``ot_position="both"`` this weight applies to the mapper-level OT term.
-        ot_lambda_encoder: Weight for the encoder-level OT term when ``ot_position="both"``.
-            Ignored for ``"mapper"`` and ``"encoder"`` positions.
-        sinkhorn_epsilon: Entropy regularization for Sinkhorn.
-        sinkhorn_max_iter: Number of Sinkhorn iterations.
-        ot_position: Where OT is applied — ``"mapper"`` (default), ``"encoder"``, or
-            ``"both"`` (mapper + encoder simultaneously).
-        eval_audio: Run a second audio-only eval pass during training.
+    **Args:**
+    - `pretrained_speech_checkpoint` (Optional[str]): Path to a speech2text checkpoint.
+      When set, backbone + audio branch weights are loaded from it (warm-start for Phase 2).
+    - `audio_feature_extractor_type` (Optional[str]): Type string for the audio encoder, e.g. ``"whisper"``.
+    - `audio_pretrained_feature_extractor` (Optional[str]): HF model ID or local path, e.g. ``"openai/whisper-medium"``.
+    - `audio_feat_dim` (int): Output dim of the audio feature extractor. Whisper-medium → 1024.
+    - `audio_freeze_feature_extractor` (bool): Freeze the audio encoder weights.
+    - `audio_multimodal_mapper_type` (Optional[str]): Mapper type — one of ``{"linear", "adapter", "cnn_adapter"}``.
+    - `audio_multimodal_mapper_layer_norm_before` (bool): LayerNorm before mapper.
+    - `audio_multimodal_mapper_layer_norm` (bool): LayerNorm inside mapper.
+    - `audio_multimodal_mapper_activation` (bool): ReLU at mapper output.
+    - `audio_multimodal_mapper_factor` (Optional[int]): Overparameterization factor (adapter).
+    - `audio_multimodal_mapper_dropout` (Optional[float]): Dropout in the audio mapper.
+    - `audio_freeze_multimodal_mapper` (bool): Freeze audio mapper weights.
+    - `ot_lambda` (float): Weight for the OT loss at mapper output. Default: 1.0.
+    - `ot_lambda_encoder` (float): Weight for the OT loss at encoder output (only for ``ot_position="both"``).
+    - `sinkhorn_epsilon` (float): Entropy regularization for Sinkhorn.
+    - `sinkhorn_max_iter` (int): Number of Sinkhorn iterations.
+    - `ot_position` (str): Where OT is applied — ``"mapper"`` (default), ``"encoder"``, or ``"both"``.
+    - `eval_audio` (bool): Run an audio-only eval pass during training.
     """
 
     model_type = "siamese_multimodal_embedder"

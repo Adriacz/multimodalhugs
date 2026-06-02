@@ -1,9 +1,14 @@
+# Standard Library Imports
 import os
-import torch
-import datasets
 from pathlib import Path
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
+
+# Third-Party Imports
+import torch
+import datasets
+from datasets import DatasetInfo, SplitGenerator
+from datasets import load_dataset
 
 try:
     import av
@@ -17,9 +22,7 @@ try:
 except ImportError:
     _TORCHVISION_AVAILABLE = False
 
-from datasets import DatasetInfo, SplitGenerator
-from datasets import load_dataset
-
+# Local Application Imports
 from multimodalhugs.data import (
     MultimodalDataConfig,
     file_exists_filter,
@@ -37,13 +40,13 @@ from multimodalhugs.processors.utils import SignalUnit
 @dataclass
 class VideoAudio2TextDataConfig(MultimodalDataConfig):
     """
-    Configuration for VideoAudio-to-Text dataset (LSC-Parlament style).
+    Configuration for VideoAudio-to-Text dataset.
 
-    The TSV must contain both video and audio timestamps for the same .mp4 file:
-        signal, signal_start, signal_end, audio_start, audio_end,
-        encoder_prompt, decoder_prompt, output
-
-    Filtering is based on the video clip length (in frames).
+    Args:
+        name (str): Identifier for this config class.
+        max_frames (Optional[int]): Filter out clips with more video frames than this.
+        min_frames (Optional[int]): Filter out clips with fewer video frames than this.
+        signal_start_end_unit (SignalUnit): Unit for signal_start/signal_end timestamps.
     """
     name: str = "VideoAudio2TextDataConfig"
     max_frames: Optional[int] = field(
@@ -56,13 +59,14 @@ class VideoAudio2TextDataConfig(MultimodalDataConfig):
     )
     signal_start_end_unit: SignalUnit = field(
         default=SignalUnit.MILLISECONDS,
-        metadata={"help": "Unit for signal_start/signal_end. MILLISECONDS or FRAMES."}
+        metadata={"help": "Unit for signal_start/signal_end. Use SignalUnit.MILLISECONDS or SignalUnit.FRAMES."}
     )
 
     def __init__(self, cfg=None, **kwargs):
         data_cfg = gather_appropriate_data_cfg(cfg)
         valid_config, extra_args, cfg_for_super = build_merged_omegaconf_config(type(self), data_cfg, **kwargs)
         super().__init__(cfg=cfg_for_super, **extra_args)
+        # pull from OmegaConf yaml (or leave defaults)
         self.max_frames = valid_config.get("max_frames", self.max_frames)
         self.min_frames = valid_config.get("min_frames", self.min_frames)
         self.signal_start_end_unit = SignalUnit(
@@ -73,16 +77,16 @@ class VideoAudio2TextDataConfig(MultimodalDataConfig):
 @register_dataset("videoaudio2text")
 class VideoAudio2TextDataset(datasets.GeneratorBasedBuilder):
     """
-    Dataset for audio+video-to-text tasks using LSC-Parlament style TSV files.
+    **VideoAudio2TextDataset: A dataset class for VideoAudio-to-Text tasks.**
 
-    Each row references a single .mp4 file containing both a video track
-    (the signer) and an audio track (the speaker). Timestamps are in ms:
-        signal_start/signal_end — video clip of the signer
-        audio_start/audio_end  — audio clip of the speaker
+    Each row references a single .mp4 file containing both a video track (the signer)
+    and an audio track (the speaker). Timestamps are in milliseconds:
+        signal_start / signal_end — video clip boundaries
+        audio_start  / audio_end  — audio clip boundaries
 
-    Because both modalities come from the same file but use different column
-    names, two ProcessorSlots can map them independently without collision:
-        VideoModalityProcessor: column_map={"video_signal": "signal", ...}
+    Two separate keys (``video_signal``, ``audio_signal``) are emitted for the same
+    path so that two ProcessorSlots can map them independently without collision:
+        VideoModalityProcessor:  column_map={"video_signal": "signal", ...}
         SpeechModalityProcessor: column_map={"audio_signal": "signal", ...}
     """
 
@@ -92,6 +96,15 @@ class VideoAudio2TextDataset(datasets.GeneratorBasedBuilder):
         *args,
         **kwargs,
     ):
+        """
+        Initialize the VideoAudio2TextDataset.
+
+        You can pass either:
+        - a config object (``VideoAudio2TextDataConfig``), or
+        - keyword arguments that match its fields.
+
+        If both are provided, keyword arguments take priority.
+        """
         if not _AV_AVAILABLE or not _TORCHVISION_AVAILABLE:
             missing = [p for p, ok in [("av", _AV_AVAILABLE), ("torchvision", _TORCHVISION_AVAILABLE)] if not ok]
             raise ImportError(
@@ -110,10 +123,10 @@ class VideoAudio2TextDataset(datasets.GeneratorBasedBuilder):
 
     def _info(self):
         features = {
-            "video_signal": str,         # path to the .mp4 (video)
+            "video_signal": str,
             "signal_start": Optional[int],
             "signal_end": Optional[int],
-            "audio_signal": str,         # same path, separate key for ProcessorSlot
+            "audio_signal": str,
             "audio_start": Optional[int],
             "audio_end": Optional[int],
             "encoder_prompt": Optional[str],

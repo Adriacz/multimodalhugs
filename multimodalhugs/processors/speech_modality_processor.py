@@ -10,6 +10,7 @@ import torchaudio
 import torchaudio.transforms as T
 from transformers import AutoProcessor
 
+# Standard Library Imports (av optional — required only for .mp4 containers)
 try:
     import av as _av
     _AV_AVAILABLE = True
@@ -124,19 +125,19 @@ class SpeechModalityProcessor(ModalityProcessor):
         signal_end: float = 0.0,
     ) -> torch.Tensor:
         """
-        Load an audio slice from an .mp4 container using PyAV.
+        **Load an audio slice from an .mp4 container using PyAV.**
 
-        PyAV provides accurate seek + decode for compressed audio (AAC, MP3)
-        inside video containers, avoiding the timestamp drift that torchaudio
-        can produce when seeking compressed streams.
+        Uses PyAV for accurate seek and decode of compressed audio (AAC) inside
+        video containers, avoiding the timestamp drift that torchaudio produces
+        when seeking compressed streams.
 
-        Args:
-            audio_path: Path to an .mp4 (or other container) file.
-            signal_start: Clip start in milliseconds. 0.0 = file start.
-            signal_end: Clip end in milliseconds. 0.0 = file end.
+        **Args:**
+        - `audio_path` (Union[str, Path]): Path to the .mp4 (or other container) file.
+        - `signal_start` (float): Clip start in milliseconds. 0.0 = file start.
+        - `signal_end` (float): Clip end in milliseconds. 0.0 = file end.
 
-        Returns:
-            Waveform tensor of shape [1, T] (mono, float32, TARGET_SAMPLE_RATE).
+        **Returns:**
+        - `torch.Tensor`: Waveform `[1, T]` (mono, float32, TARGET_SAMPLE_RATE).
         """
         if not _AV_AVAILABLE:
             raise ImportError(
@@ -187,10 +188,8 @@ class SpeechModalityProcessor(ModalityProcessor):
 
         waveform = torch.cat(chunks, dim=-1)  # [C, T]
 
-        # Trim to exact boundaries relative to the first decoded frame's PTS.
-        # Pre-cut mp4 clips preserve original session timestamps (e.g. a clip covering
-        # 3317–3976 ms has frames with PTS starting at ~3.317 s, not 0). Using absolute
-        # sample indices (int(start_sec * sr)) would index past the end of the waveform.
+        # Trim relative to the first decoded frame's PTS.
+        # Pre-cut clips preserve original session timestamps, so start_sec is not 0.
         _chunk_start = chunk_start_sec if chunk_start_sec is not None else start_sec
         rel_start = max(0, int((start_sec - _chunk_start) * native_sr))
         rel_end = (
@@ -224,20 +223,18 @@ class SpeechModalityProcessor(ModalityProcessor):
         signal_end: float = 0.0,
     ) -> torch.Tensor:
         """
-        Load a slice of an audio file as a waveform tensor [1, T] at
-        TARGET_SAMPLE_RATE.
+        **Load a slice of an audio file as a waveform tensor.**
 
-        Dispatches to ``_load_waveform_from_mp4`` for .mp4/.mp3/.mkv containers
-        (using PyAV for accurate compressed-audio seeking) and falls back to
-        torchaudio for .wav and other lossless formats.
+        Dispatches to ``_load_waveform_from_mp4`` for .mp4/.mkv containers (PyAV)
+        and falls back to torchaudio for .wav and other lossless formats.
 
-        Args:
-            audio_path: Path to the audio/video file.
-            signal_start: Clip start in milliseconds. 0.0 = start of file.
-            signal_end: Clip end in milliseconds. 0.0 = end of file.
+        **Args:**
+        - `audio_path` (Union[str, Path]): Path to the audio/video file.
+        - `signal_start` (float): Clip start in milliseconds. 0.0 = start of file.
+        - `signal_end` (float): Clip end in milliseconds. 0.0 = end of file.
 
-        Returns:
-            Waveform tensor of shape [1, T] (mono, float32, 16 kHz).
+        **Returns:**
+        - `torch.Tensor`: Waveform `[1, T]` (mono, float32, 16 kHz).
         """
         ext = Path(str(audio_path)).suffix.lower()
         _CONTAINER_FORMATS = {".mp4", ".mkv", ".mov", ".avi", ".mp3", ".m4a", ".aac"}
