@@ -1,4 +1,27 @@
-# MultiModalHugs — Project Notes (feature/siamese-ot-av)
+# MultiModalHugs — Project Notes (master — video-from-speech-ot-both)
+
+## Estado actual del repo (master)
+
+Master está en `7feb4ff` — resultado del merge de `feature/video-from-speech-ot-both`.
+
+| Branch | Estado | Descripción |
+|--------|--------|-------------|
+| `master` | ← estás aquí | video-from-speech-ot-both fusionado; incluye `ot_position`, warm-start desde speech, bugs 1-3 corregidos |
+| `feature/siamese-ot-final` | archivo | estado anterior de master (siamese sin `ot_position`) |
+| `feature/video-from-speech` | experimento A | video fine-tuning desde speech checkpoint, sin OT |
+| `feature/video-from-speech-ot-mapper` | experimento B | ídem + OT en mapper |
+| `feature/video-from-speech-ot-both` | fusionada en master | ídem + OT en mapper + encoder |
+| `feature/audio-teacher-ot` | rama activa paralela | AudioTeacherVideoStudentModel (arquitectura separada) |
+
+Ficheros modificados respecto al `MultiModalEmbedderModel` base:
+- `multimodalhugs/data/datasets/videoaudio2text.py` — NUEVO
+- `multimodalhugs/modules/sinkhorn.py` — NUEVO
+- `multimodalhugs/models/siamese_multimodal_embedder/` — NUEVO (directorio completo)
+- `multimodalhugs/processors/speech_modality_processor.py` — modificado (soporte mp4 via PyAV)
+- `multimodalhugs/training_setup/general_training_setup.py` — modificado (entrada `videoaudio2text`)
+- `examples/multimodal_translation/lsc_parlament_siamese/` — 4 YAMLs de experimentos A/B/C
+
+---
 
 ## Objetivo del proyecto
 
@@ -324,8 +347,15 @@ Durante `generate()`:
 ```bash
 git clone https://github.com/Adriacz/multimodalhugs.git
 cd multimodalhugs
-git checkout feature/siamese-ot-av
+# master ya contiene el código completo de video-from-speech-ot-both
 pip install -e ".[full]"
+```
+
+Para los experimentos activos en el cluster:
+```bash
+git checkout feature/video-from-speech        # Versión A (sin OT)
+git checkout feature/video-from-speech-ot-mapper  # Versión B (OT mapper)
+# Versión C está fusionada en master
 ```
 
 Dependencias clave: `torch<2.6`, `transformers<=4.44.2`, `av` (para leer audio de mp4).
@@ -350,18 +380,37 @@ En `translation_training.py`, `resolve_checkpoint_path_from_general_setup_path` 
 
 ## Experimentos de video-from-speech (Fase 2)
 
-Tres versiones, cada una en su propia rama. Todas warm-start desde el speech checkpoint.
+### Visión general de las dos fases
 
-| Versión | Rama | Descripción |
-|---------|------|-------------|
-| A | `feature/video-from-speech` | Sin OT. Solo MT loss. `ot_lambda=0`. Audio branch en memoria solo para audio eval. |
-| B | `feature/video-from-speech-ot-mapper` | OT en salida del mapper. `ot_lambda=1.0`, `ot_position=mapper`. |
-| C | `feature/video-from-speech-ot-both` | OT en mapper + encoder. `ot_lambda=1.0`, `ot_lambda_encoder=1.0`, `ot_position=both`. |
+```
+Fase 1 (HECHA): speech2text — Whisper fine-tuned en LSC-Parlament
+                input_audio → Whisper → AudioMapper → M2M backbone → texto catalán
+                Checkpoint: checkpoints_speech_v5/train/checkpoint-best
 
-YAMLs en `examples/multimodal_translation/lsc_parlament_siamese/`:
-- `config_video_from_speech_notot.yaml` → Versión A
-- `config_video_from_speech_ot_mapper.yaml` → Versión B
-- `config_video_from_speech_ot_both.yaml` → Versión C
+Fase 2 (estas ramas): video fine-tuning warm-started desde ese speech checkpoint
+                input_frames → CLIP → VideoMapper → M2M backbone → texto catalán
+                El backbone y la rama audio se cargan desde el speech checkpoint.
+                La rama audio queda frozen en training; se usa solo en eval (dual eval).
+```
+
+**Diferencia clave respecto al siamese original** (`feature/siamese-ot-final`):
+- Siamese original: Whisper genérico (no fine-tuned), entrenamiento video+audio simultáneo desde cero.
+- Video-from-speech: Whisper **ya fine-tuned en Parlament** (Fase 1), video fine-tuning desde ese punto.
+  El teacher es mucho más fuerte porque conoce el dominio LSC-Parlament.
+
+Las tres versiones difieren solo en si se usa OT como loss auxiliar durante el video fine-tuning:
+
+| Versión | Rama | YAML | OT durante training |
+|---------|------|------|---------------------|
+| A | `feature/video-from-speech` | `config_video_from_speech_notot.yaml` | Sin OT. `ot_lambda=0`. Solo MT loss. |
+| B | `feature/video-from-speech-ot-mapper` | `config_video_from_speech_ot_mapper.yaml` | OT en salida del mapper. `ot_lambda=1.0`, `ot_position=mapper`. |
+| C | `feature/video-from-speech-ot-both` | `config_video_from_speech_ot_both.yaml` | OT en mapper + encoder. `ot_lambda=1.0`, `ot_lambda_encoder=1.0`, `ot_position=both`. |
+
+En las tres versiones:
+- Arquitectura: `siamese_multimodal_embedder` (mismo modelo, parámetros distintos)
+- Warm-start vía `pretrained_speech_checkpoint`: backbone M2M + Whisper + AudioMapper cargados desde Fase 1
+- Rama audio: completamente frozen durante training (`audio_freeze_feature_extractor: true`, `audio_freeze_multimodal_mapper: true`)
+- Dual eval en cada `eval_steps`: `eval_sacrebleu` (vídeo) + `eval_audio_sacrebleu` (audio frozen)
 
 Speech checkpoint de warm-start: `/home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best`
 
@@ -395,7 +444,7 @@ if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0 and inp
 
 **Fix:** Cuando `encoder_outputs is not None`, ignorar siempre la `attention_mask` entrante y reconstruirla directamente desde `encoder_outputs[0].shape`.
 
-Los tres bugs afectan a las tres ramas (A, B, C). Los fixes 1 y 2 ya estaban pusheados. El fix 3 está en esta rama — pushear y cherry-pick a las otras dos.
+Los tres bugs afectan a las tres ramas (A, B, C). Los tres fixes están en master (fusionados desde `feature/video-from-speech-ot-both`). Aplicar cherry-pick a las ramas A y B si se reactivan.
 
 ---
 
@@ -406,9 +455,9 @@ El install es editable (`pip install -e .`), así que un `git pull` es suficient
 ```bash
 cd /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/multimodalhugs
 git fetch origin
-git checkout feature/video-from-speech && git pull        # Versión A
+git checkout master && git pull                              # Versión C (en master)
+git checkout feature/video-from-speech && git pull            # Versión A
 git checkout feature/video-from-speech-ot-mapper && git pull  # Versión B
-git checkout feature/video-from-speech-ot-both && git pull    # Versión C
 ```
 
 ### Reanudar un job caído desde el último checkpoint
