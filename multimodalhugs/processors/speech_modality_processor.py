@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -313,13 +314,26 @@ class SpeechModalityProcessor(ModalityProcessor):
                 if self.custom_preprocessor is not None:
                     # HF AutoProcessor (e.g. WhisperFeatureExtractor) expects a
                     # 1-D numpy array at TARGET_SAMPLE_RATE.
+                    n_valid_samples = waveform.shape[-1]
                     features = self.custom_preprocessor(
                         waveform.squeeze(0).numpy(),
                         sampling_rate=self.TARGET_SAMPLE_RATE,
                         return_tensors="pt",
                     )
                     # Most HF audio processors return `input_features` [1, n_mels, T]
-                    result = features["input_features"].squeeze(0)  # → [n_mels, T]
+                    result = features["input_features"].squeeze(0)  # → [n_mels, T_full]
+                    # WhisperFE always pads to 3000 mel frames (30 s) regardless of
+                    # actual audio duration. Truncate to the valid portion so that
+                    # process_batch produces a correct attention mask and the Whisper
+                    # encoder only processes real audio content.
+                    # hop_length=160 samples @ 16kHz → 100 mel frames/s; Whisper uses
+                    # the feature_extractor's hop_length when available, else 160.
+                    hop = getattr(
+                        getattr(self.custom_preprocessor, "feature_extractor", self.custom_preprocessor),
+                        "hop_length", 160,
+                    )
+                    n_valid_mel = min(math.ceil(n_valid_samples / hop), result.shape[-1])
+                    result = result[:, :n_valid_mel]
                 else:
                     result = self._mel_transform(waveform).squeeze(0)  # → [n_mels, T]
 
@@ -383,12 +397,19 @@ class SpeechModalityProcessor(ModalityProcessor):
             if waveform.ndim == 1:
                 waveform = waveform.unsqueeze(0)  # [T] → [1, T]
             if self.custom_preprocessor is not None:
+                n_valid_samples = waveform.shape[-1]
                 features = self.custom_preprocessor(
                     waveform.squeeze(0).numpy(),
                     sampling_rate=self.TARGET_SAMPLE_RATE,
                     return_tensors="pt",
                 )
-                return features["input_features"].squeeze(0)
+                result = features["input_features"].squeeze(0)
+                hop = getattr(
+                    getattr(self.custom_preprocessor, "feature_extractor", self.custom_preprocessor),
+                    "hop_length", 160,
+                )
+                n_valid_mel = min(math.ceil(n_valid_samples / hop), result.shape[-1])
+                return result[:, :n_valid_mel]
             return self._mel_transform(waveform).squeeze(0)
 
         return self._load_audio(signal, signal_start, signal_end)
