@@ -21,6 +21,7 @@ from typing import Optional, Tuple, Union, Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
 from multimodalhugs.models.multimodal_embedder.modeling_multimodal_embedder import MultiModalEmbedderModel
@@ -106,6 +107,29 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
     # Initialisation
     # ------------------------------------------------------------------
 
+    def _audio_valid_mask(
+        self,
+        audio_repr: torch.Tensor,
+        audio_attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Build [B, T_a] validity mask for Whisper encoder output.
+
+        SpeechModalityProcessor truncates the mel to n_valid_mel frames so that
+        process_batch produces a meaningful audio_attention_mask [B, n_valid_mel].
+        The model pads back to 3000 before calling Whisper (required by the encoder),
+        so T_a is always 1500.  Here we convert the mel-level mask to encoder-level:
+            valid_enc_frames = ceil(n_valid_mel / 2)   (Whisper conv stride = 2)
+        """
+        B_a, T_a = audio_repr.shape[:2]
+        if audio_attention_mask is not None:
+            valid_mel = audio_attention_mask.sum(dim=1).long()   # [B]
+            valid_enc = (valid_mel + 1) // 2                     # ceil div by 2
+            mask = torch.zeros((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            for i in range(B_a):
+                mask[i, :min(valid_enc[i].item(), T_a)] = 1
+            return mask
+        return torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+
     def _init_audio_branch(self, config: SiameseMultiModalEmbedderConfig):
         if config.audio_feature_extractor_type is None:
             self.audio_feature_extractor = None
@@ -173,11 +197,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         input_audio must be declared here to reach this method from generate().
         """
         if input_frames is None and input_audio is not None:
+            if input_audio.shape[-1] < 3000:
+                input_audio = F.pad(input_audio, (0, 3000 - input_audio.shape[-1]))
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)
-
-            B_a, T_a = audio_repr.shape[:2]
-            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            audio_mask = self._audio_valid_mask(audio_repr, audio_attention_mask)
 
             if isinstance(self.audio_mapper, MultimodalMapper):
                 audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
@@ -225,6 +249,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         self,
         input_audio: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
+        audio_attention_mask: Optional[torch.Tensor],
         encoder_prompt: Optional[torch.LongTensor],
         encoder_prompt_length_padding_mask: Optional[torch.LongTensor],
         decoder_input_ids: Optional[torch.LongTensor],
@@ -249,11 +274,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 decoder_input_ids = None
                 decoder_attention_mask = None
 
+            if input_audio.shape[-1] < 3000:
+                input_audio = F.pad(input_audio, (0, 3000 - input_audio.shape[-1]))
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)
-
-            B_a, T_a = audio_repr.shape[:2]
-            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            audio_mask = self._audio_valid_mask(audio_repr, audio_attention_mask)
 
             if isinstance(self.audio_mapper, MultimodalMapper):
                 audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
@@ -403,6 +428,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             return self._forward_audio_only(
                 input_audio=input_audio,
                 attention_mask=attention_mask,
+                audio_attention_mask=audio_attention_mask,
                 encoder_prompt=encoder_prompt,
                 encoder_prompt_length_padding_mask=encoder_prompt_length_padding_mask,
                 decoder_input_ids=decoder_input_ids,
@@ -449,15 +475,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             # inputs_embeds: [B, T_v, D],  attention_mask: [B, T_v]
 
             # --- Audio: FeatureExtractor ---
+            if input_audio.shape[-1] < 3000:
+                input_audio = F.pad(input_audio, (0, 3000 - input_audio.shape[-1]))
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
-                audio_repr = self.audio_feature_extractor(input_audio)  # [B, T_a, D_audio]
-
-            # SpeechModalityProcessor now truncates mel to valid audio length before
-            # batching, so T_a = ceil(n_valid_mel / 2) — all encoder frames are real.
-            B_a, T_a = audio_repr.shape[:2]
-            audio_mask = torch.ones(
-                (B_a, T_a), dtype=torch.long, device=audio_repr.device
-            )
+                audio_repr = self.audio_feature_extractor(input_audio)  # [B, 1500, D_audio]
+            audio_mask = self._audio_valid_mask(audio_repr, audio_attention_mask)
 
             # --- Audio: Mapper (MultimodalMapper or plain Linear) ---
             if isinstance(self.audio_mapper, MultimodalMapper):
