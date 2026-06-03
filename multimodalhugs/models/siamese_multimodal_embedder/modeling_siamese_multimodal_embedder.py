@@ -462,7 +462,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                     inputs_embeds = input_frames
                 else:
                     inputs_embeds = self.feature_extractor(input_frames)
-                    # Whisper always emits fixed-length output; reset mask.
+                    # CLIP output length equals input frame count; reset mask to all-ones.
                     if attention_mask is not None:
                         B, T = inputs_embeds.shape[:2]
                         attention_mask = torch.ones(
