@@ -424,3 +424,15 @@ O pasar explícitamente:
 multimodalhugs-train --config_path ... \
   --resume_from_checkpoint .../checkpoints_video_from_speech_notot/checkpoint-XXXXX
 ```
+
+---
+
+## Bug OT: máscara de Whisper incorrecta (junio 2026)
+
+**Causa:** `WhisperFeatureExtractor` siempre produce [80, 3000] mel frames (30 s de audio) sin importar la duración real del clip. El OT se calculaba entre ~200 frames de vídeo y 1500 frames del encoder de Whisper, de los cuales el 50–83% eran codificaciones de silencio (padding). La señal de alineamiento era ruido → todos los experimentos (OT/no-OT) convergían igual.
+
+**Fix:** `SpeechModalityProcessor._load_audio` y el path numpy de `process_sample` ahora truncan el mel al número real de frames válidos (`result[:, :n_valid_mel]`) antes de devolver. `process_batch` → `pad_and_create_mask` crea la máscara correcta. El encoder de Whisper recibe solo los frames reales → T_a variable pero siempre válido.
+
+**Fórmula:** `n_valid_mel = ceil(n_valid_samples / hop_length)`, donde `hop_length = 160` (10 ms @ 16 kHz). El encoder de Whisper (conv stride=2) produce `T_a = ceil(n_valid_mel / 2)` frames, todos válidos.
+
+**Archivos modificados:** `multimodalhugs/processors/speech_modality_processor.py`

@@ -452,9 +452,8 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)  # [B, T_a, D_audio]
 
-            # Whisper always outputs a fixed-length sequence regardless of input;
-            # the incoming audio_attention_mask reflects mel padding, not encoder
-            # output length.  Reset to all-ones in encoder output space.
+            # SpeechModalityProcessor now truncates mel to valid audio length before
+            # batching, so T_a = ceil(n_valid_mel / 2) — all encoder frames are real.
             B_a, T_a = audio_repr.shape[:2]
             audio_mask = torch.ones(
                 (B_a, T_a), dtype=torch.long, device=audio_repr.device
