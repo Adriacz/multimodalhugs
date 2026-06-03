@@ -431,8 +431,14 @@ multimodalhugs-train --config_path ... \
 
 **Causa:** `WhisperFeatureExtractor` siempre produce [80, 3000] mel frames (30 s de audio) sin importar la duración real del clip. El OT se calculaba entre ~200 frames de vídeo y 1500 frames del encoder de Whisper, de los cuales el 50–83% eran codificaciones de silencio (padding). La señal de alineamiento era ruido → todos los experimentos (OT/no-OT) convergían igual.
 
-**Fix:** `SpeechModalityProcessor._load_audio` y el path numpy de `process_sample` ahora truncan el mel al número real de frames válidos (`result[:, :n_valid_mel]`) antes de devolver. `process_batch` → `pad_and_create_mask` crea la máscara correcta. El encoder de Whisper recibe solo los frames reales → T_a variable pero siempre válido.
+**Fix (dos partes):**
 
-**Fórmula:** `n_valid_mel = ceil(n_valid_samples / hop_length)`, donde `hop_length = 160` (10 ms @ 16 kHz). El encoder de Whisper (conv stride=2) produce `T_a = ceil(n_valid_mel / 2)` frames, todos válidos.
+1. `SpeechModalityProcessor._load_audio` y path numpy de `process_sample`: truncan el mel a `n_valid_mel = ceil(n_valid_samples / hop_length)` frames antes de devolver → `process_batch`/`pad_and_create_mask` genera un `audio_attention_mask` con 1=válido, 0=silencio.
 
-**Archivos modificados:** `multimodalhugs/processors/speech_modality_processor.py`
+2. `SiameseMultiModalEmbedderModel`: antes de llamar al encoder de Whisper, re-paddea a 3000 (`F.pad`) porque WhisperEncoder lo exige. Después usa `_audio_valid_mask(audio_repr, audio_attention_mask)` para construir la máscara del encoder output: `valid_enc = ceil(n_valid_mel / 2)` (stride-2 de las conv de Whisper). El OT solo opera sobre frames reales.
+
+**Archivos modificados:**
+- `multimodalhugs/processors/speech_modality_processor.py` — truncación del mel
+- `multimodalhugs/models/siamese_multimodal_embedder/modeling_siamese_multimodal_embedder.py` — padding + `_audio_valid_mask()` + `audio_attention_mask` en `_forward_audio_only`
+
+**Rama de test:** `feature/video-from-speech-ot-both` (commit `b508c35`). Si mejora → cherry-pick a A, B, D.
