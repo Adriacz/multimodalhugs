@@ -18,7 +18,7 @@ from transformers import (
 
 import multimodalhugs.processors  # triggers AutoProcessor registration for all processor classes
 import multimodalhugs.models
-from multimodalhugs import MultiLingualSeq2SeqTrainer
+from multimodalhugs import MultiLingualSeq2SeqTrainer, OTLossLoggingCallback
 
 
 import logging
@@ -324,7 +324,7 @@ def main():
         result["gen_len"] = round(np.mean(prediction_lens), 4)
         return result
 
-    callbacks_list = []
+    callbacks_list = [OTLossLoggingCallback()]
     if training_args.early_stopping_patience is not None:
         callbacks_list.append(EarlyStoppingCallback(early_stopping_patience=training_args.early_stopping_patience))
 
