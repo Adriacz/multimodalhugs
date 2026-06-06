@@ -660,6 +660,14 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         else:
             total_loss = mt_loss + self.config.ot_lambda * ot_loss
 
+        if self.training:
+            self._last_mt_loss = mt_loss.detach().item()
+            if self.config.ot_position == "both":
+                self._last_ot_mapper_loss = ot_mapper_loss.detach().item()
+                self._last_ot_encoder_loss = ot_encoder_loss.detach().item()
+            else:
+                self._last_ot_loss = ot_loss.detach().item()
+
         if not (return_dict if return_dict is not None else True):
             output = (outputs.logits,) + outputs[1:]
             return (total_loss,) + output if total_loss is not None else output

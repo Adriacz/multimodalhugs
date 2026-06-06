@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 import torch.nn.functional as F
 
-from transformers import Trainer, Seq2SeqTrainer
+from transformers import Trainer, Seq2SeqTrainer, TrainerCallback
 
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
@@ -31,6 +31,29 @@ def all_values_equal(tensor):
     if tensor.numel() == 0:  # Check if the tensor is empty, thus, no decoder_prompt specified.
         return False
     return torch.all(tensor == tensor.flatten()[0])
+
+
+class OTLossLoggingCallback(TrainerCallback):
+    """Injects per-component OT/MT loss values into the Trainer log dict.
+
+    SiameseMultiModalEmbedderModel stores instantaneous loss components as model
+    attributes after each training forward pass. This callback reads those attributes
+    and adds them to the log dict so they appear in WandB/TensorBoard alongside
+    the regular `loss`. No-op when the model has no OT branch.
+    """
+
+    def on_log(self, args, state, control, logs=None, model=None, **kwargs):
+        if logs is None or model is None:
+            return
+        raw = model.module if hasattr(model, "module") else model
+        if hasattr(raw, "_last_mt_loss"):
+            logs["mt_loss"] = raw._last_mt_loss
+        if hasattr(raw, "_last_ot_loss"):
+            logs["ot_loss"] = raw._last_ot_loss
+        if hasattr(raw, "_last_ot_mapper_loss"):
+            logs["ot_mapper_loss"] = raw._last_ot_mapper_loss
+        if hasattr(raw, "_last_ot_encoder_loss"):
+            logs["ot_encoder_loss"] = raw._last_ot_encoder_loss
 
 class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
