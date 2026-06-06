@@ -8,5 +8,5 @@ from .custom_datasets import *
 from .data import *
 from .models import *
 from .utils import *
-from .multilingual_seq2seq_trainer import MultiLingualSeq2SeqTrainer
+from .multilingual_seq2seq_trainer import MultiLingualSeq2SeqTrainer, OTLossLoggingCallback
 
