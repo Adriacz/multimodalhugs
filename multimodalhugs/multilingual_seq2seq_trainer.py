@@ -57,6 +57,37 @@ class OTLossLoggingCallback(TrainerCallback):
 
 class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """Composite loss: label-smoothed MT + OT (when model has an OT branch).
+
+        The default Trainer.compute_loss pops 'labels' before the model forward
+        when label_smoothing_factor > 0, then uses LabelSmoother for the loss.
+        For Siamese models this discards the OT losses returned by the model.
+
+        Fix: let the model run without labels (so outputs.loss = OT-only), then
+        add the label-smoothed MT loss on top.  When there is no label_smoother
+        (label_smoothing_factor == 0) the behaviour is identical to the default.
+        """
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+
+        if labels is not None and self.label_smoother is not None:
+            # outputs.loss == OT losses only (model received labels=None → mt=0)
+            smoothed_mt = self.label_smoother(outputs, labels)
+            loss = smoothed_mt + outputs.loss
+            # Keep _last_mt_loss consistent with what is actually backpropped.
+            raw = model.module if hasattr(model, "module") else model
+            if hasattr(raw, "_last_mt_loss"):
+                raw._last_mt_loss = smoothed_mt.detach().item()
+        else:
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        return (loss, outputs) if return_outputs else loss
+
     def __init__(
         self,
         model: Union["PreTrainedModel", nn.Module] = None,
