@@ -57,6 +57,19 @@ class OTLossLoggingCallback(TrainerCallback):
 
 class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
+    def log(self, logs: Dict[str, float]) -> None:
+        """Inject per-component OT/MT losses into logs before WandB sees them.
+
+        OTLossLoggingCallback added these via on_log, but WandbCallback runs
+        first so the values never reached WandB. Overriding log() here ensures
+        they are in the dict before any callback (including WandB) processes it.
+        """
+        raw = self.model.module if hasattr(self.model, "module") else self.model
+        for attr in ("_last_mt_loss", "_last_ot_loss", "_last_ot_mapper_loss", "_last_ot_encoder_loss"):
+            if hasattr(raw, attr):
+                logs[attr[len("_last_"):]] = getattr(raw, attr)
+        super().log(logs)
+
     def compute_loss(self, model, inputs, return_outputs=False):
         """Composite loss: label-smoothed MT + OT (when model has an OT branch).
 
