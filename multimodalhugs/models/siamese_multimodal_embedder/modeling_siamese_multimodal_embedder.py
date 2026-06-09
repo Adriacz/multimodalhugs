@@ -144,6 +144,12 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 else nn.Identity()
             )
 
+        # Shared LayerNorm applied to both modalities before mapper-level OT.
+        # Aligns mean/std of the two projected spaces, stabilising the OT cost matrix.
+        self.ot_pre_norm = (
+            nn.LayerNorm(config.d_model) if getattr(config, "ot_pre_norm", False) else None
+        )
+
     # ------------------------------------------------------------------
     # Encoder-only path for generate() — audio or video
     # ------------------------------------------------------------------
@@ -465,6 +471,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
             elif self.audio_mapper is not None:
                 audio_repr = self.audio_mapper(audio_repr)
+
+            # Optional shared LayerNorm before mapper-level OT — aligns mean/std of both spaces.
+            if self.ot_pre_norm is not None and self.config.ot_position != "encoder":
+                inputs_embeds = self.ot_pre_norm(inputs_embeds)
+                audio_repr = self.ot_pre_norm(audio_repr)
 
             if self.config.ot_position == "encoder":
                 # ── OT at M2M encoder output ───────────────────────────────

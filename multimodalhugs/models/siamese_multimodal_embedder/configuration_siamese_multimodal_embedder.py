@@ -53,6 +53,10 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         sinkhorn_max_iter: Number of Sinkhorn iterations.
         ot_position: Where OT is applied — ``"mapper"`` (default), ``"encoder"``, or
             ``"both"`` (mapper + encoder simultaneously).
+        ot_pre_norm: If True, apply a shared LayerNorm to both video and audio
+            representations immediately before computing mapper-level OT loss.
+            Aligns the mean and std of both spaces, which stabilises OT when
+            the two mappers have not yet converged to the same scale.
         eval_audio: Run a second audio-only eval pass during training.
     """
 
@@ -82,6 +86,7 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         sinkhorn_epsilon: float = 0.1,
         sinkhorn_max_iter: int = 100,
         ot_position: str = "mapper",
+        ot_pre_norm: bool = False,
         # --- Eval ---
         eval_audio: bool = True,
         **kwargs,
@@ -108,4 +113,5 @@ class SiameseMultiModalEmbedderConfig(MultiModalEmbedderConfig):
         self.sinkhorn_epsilon = sinkhorn_epsilon
         self.sinkhorn_max_iter = sinkhorn_max_iter
         self.ot_position = ot_position
+        self.ot_pre_norm = ot_pre_norm
         self.eval_audio = eval_audio
