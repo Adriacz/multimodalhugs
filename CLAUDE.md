@@ -350,18 +350,22 @@ En `translation_training.py`, `resolve_checkpoint_path_from_general_setup_path` 
 
 ## Experimentos de video-from-speech (Fase 2)
 
-Tres versiones, cada una en su propia rama. Todas warm-start desde el speech checkpoint.
+Totes warm-start des del speech checkpoint. Versions A/B/C són les originals. D/E incorporen millores de juny 2026.
 
-| Versión | Rama | Descripción |
-|---------|------|-------------|
-| A | `feature/video-from-speech` | Sin OT. Solo MT loss. `ot_lambda=0`. Audio branch en memoria solo para audio eval. |
-| B | `feature/video-from-speech-ot-mapper` | OT en salida del mapper. `ot_lambda=1.0`, `ot_position=mapper`. |
-| C | `feature/video-from-speech-ot-both` | OT en mapper + encoder. `ot_lambda=1.0`, `ot_lambda_encoder=1.0`, `ot_position=both`. |
+| Versió | Rama | Descripció |
+|--------|------|------------|
+| A | `feature/video-from-speech` | Sense OT. Només MT loss. `ot_lambda=0`. |
+| B | `feature/video-from-speech-ot-mapper` | OT a la sortida del mapper. `ot_lambda=1.0`, `ot_position=mapper`. |
+| C | `feature/video-from-speech-ot-both` | OT mapper + encoder. `ot_lambda=1.0`, `ot_lambda_encoder=1.0`, `ot_position=both`. |
+| D | `feature/video-from-speech-ot-mapper-sg` | Com B però amb Sinkhorn stop-gradient, `sinkhorn_max_iter=30`, `max_grad_norm=1.0`. |
+| E | `feature/video-from-speech-ot-both-no-mask-sg-prenorm` | Com C (sense mask fix, base `no-mask-fix`) + stop-gradient + `ot_pre_norm=true` + `ot_lambda=0.5`. |
 
 YAMLs en `examples/multimodal_translation/lsc_parlament_siamese/`:
-- `config_video_from_speech_notot.yaml` → Versión A
-- `config_video_from_speech_ot_mapper.yaml` → Versión B
-- `config_video_from_speech_ot_both.yaml` → Versión C
+- `config_video_from_speech_notot.yaml` → Versió A
+- `config_video_from_speech_ot_mapper.yaml` → Versió B
+- `config_video_from_speech_ot_both.yaml` → Versió C
+- `config_video_from_speech_ot_mapper_sg.yaml` → Versió D
+- *(crear a partir de C)* → Versió E (afegir `ot_pre_norm: true`, `ot_lambda: 0.5`, `ot_lambda_encoder: 0.5`, `sinkhorn_max_iter: 30`, `gradient_accumulation_steps: 128`, `max_grad_norm: 1.0`)
 
 Speech checkpoint de warm-start: `/home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best`
 
@@ -399,6 +403,33 @@ Los tres bugs afectan a las tres ramas (A, B, C). Los fixes 1 y 2 ya estaban pus
 
 ---
 
+## Sinkhorn stop-gradient (juny 2026)
+
+**Problema original:** PyTorch feia backprop a través de totes les iteracions del loop Sinkhorn (100 `logsumexp` encadenats) — incorrecte teòricament i inestable.
+
+**Fix (envelope theorem):** Totes les iteracions i el pla de transport `P` es calculen dins `torch.no_grad()`. El gradient flueix únicament a través de `C` en `(P * C).sum()`. `∂L/∂C_ij = P_ij`, que és exactament el gradient OT correcte a la convergència.
+
+**Fitxer:** `multimodalhugs/modules/sinkhorn.py`
+**Branques amb el fix:** D (`feature/video-from-speech-ot-mapper-sg`) i E (`feature/video-from-speech-ot-both-no-mask-sg-prenorm`).
+**Paràmetre recomanat:** `sinkhorn_max_iter: 30` (suficient en log-domain; era 100).
+
+---
+
+## ot_pre_norm — LayerNorm compartida abans de l'OT (juny 2026)
+
+**Motivació:** Després dels mappers, els espais de vídeo i àudio poden tenir mitja i desviació estàndard molt diferents → matriu de costos OT sorollosa. Una LayerNorm compartida aplicada a les dues representacions just abans de calcular l'OT del mapper les posa a la mateixa escala.
+
+**Implementació:**
+- Config: `ot_pre_norm: bool = False` a `SiameseMultiModalEmbedderConfig`
+- Model: `self.ot_pre_norm = nn.LayerNorm(config.d_model)` (identitat a la inicialització)
+- Forward: aplicat a `inputs_embeds` (vídeo) i `audio_repr` (àudio) DESPRÉS dels mappers i ABANS de `batch_sinkhorn_loss`. No s'aplica a `ot_position="encoder"` (el M2M encoder ja té LN pròpia) ni a `_forward_audio_only`.
+- La LN compartida rep gradients de `ot_mapper_loss` via les dues modalitats, i de `ot_encoder_loss` + `mt_loss` via vídeo.
+
+**Branques amb el fix:** E (`feature/video-from-speech-ot-both-no-mask-sg-prenorm`) i D (`feature/video-from-speech-ot-mapper-sg`).
+**Activació al YAML:** `ot_pre_norm: true` al bloc `model:`.
+
+---
+
 ## Actualizar código en el cluster (install editable)
 
 El install es editable (`pip install -e .`), así que un `git pull` es suficiente — no hay que reinstalar:
@@ -406,9 +437,11 @@ El install es editable (`pip install -e .`), así que un `git pull` es suficient
 ```bash
 cd /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/multimodalhugs
 git fetch origin
-git checkout feature/video-from-speech && git pull        # Versión A
-git checkout feature/video-from-speech-ot-mapper && git pull  # Versión B
-git checkout feature/video-from-speech-ot-both && git pull    # Versión C
+git checkout feature/video-from-speech && git pull                              # Versió A
+git checkout feature/video-from-speech-ot-mapper && git pull                   # Versió B
+git checkout feature/video-from-speech-ot-both && git pull                     # Versió C
+git checkout feature/video-from-speech-ot-mapper-sg && git pull                # Versió D
+git checkout feature/video-from-speech-ot-both-no-mask-sg-prenorm && git pull  # Versió E
 ```
 
 ### Reanudar un job caído desde el último checkpoint
