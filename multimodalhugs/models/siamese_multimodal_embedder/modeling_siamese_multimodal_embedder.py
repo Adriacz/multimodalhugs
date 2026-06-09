@@ -21,6 +21,7 @@ from typing import Optional, Tuple, Union, Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
 from multimodalhugs.models.multimodal_embedder.modeling_multimodal_embedder import MultiModalEmbedderModel
