@@ -58,16 +58,16 @@ class OTLossLoggingCallback(TrainerCallback):
 class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
     def log(self, logs: Dict[str, float]) -> None:
-        """Inject per-component OT/MT losses into logs before WandB sees them.
+        """Inject averaged per-component OT/MT losses into logs before WandB sees them.
 
-        OTLossLoggingCallback added these via on_log, but WandbCallback runs
-        first so the values never reached WandB. Overriding log() here ensures
-        they are in the dict before any callback (including WandB) processes it.
+        Component losses are accumulated in compute_loss and averaged here over the same
+        window as train/loss, so the equation loss ≈ mt_loss + ot_lambda * ot_loss holds.
         """
-        raw = self.model.module if hasattr(self.model, "module") else self.model
-        for attr in ("_last_mt_loss", "_last_ot_loss", "_last_ot_mapper_loss", "_last_ot_encoder_loss"):
-            if hasattr(raw, attr):
-                logs[attr[len("_last_"):]] = getattr(raw, attr)
+        if self._n_component_steps > 0:
+            for key, total in self._component_loss_sums.items():
+                logs[key] = total / self._n_component_steps
+            self._component_loss_sums = defaultdict(float)
+            self._n_component_steps = 0
         super().log(logs)
 
     def compute_loss(self, model, inputs, return_outputs=False):
@@ -101,7 +101,17 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             if hasattr(raw, "_last_mt_loss"):
                 raw._last_mt_loss = smoothed_mt.detach().item()
         else:
+            raw = model.module if hasattr(model, "module") else model
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        # Accumulate component losses for averaged logging (mirrors Trainer's tr_loss accumulation).
+        # Only during training; _last_* attrs are only set when model.training is True.
+        raw = model.module if hasattr(model, "module") else model
+        if raw.training:
+            for attr in ("_last_mt_loss", "_last_ot_loss", "_last_ot_mapper_loss", "_last_ot_encoder_loss"):
+                if hasattr(raw, attr):
+                    self._component_loss_sums[attr[len("_last_"):]] += getattr(raw, attr)
+            self._n_component_steps += 1
 
         return (loss, outputs) if return_outputs else loss
 
@@ -145,6 +155,8 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         self.visualize_prediction_prob = visualize_prediction_prob
         self.print_decoder_prompt_on_prediction = print_decoder_prompt_on_prediction
         self.print_special_tokens_on_prediction = print_special_tokens_on_prediction
+        self._component_loss_sums: Dict[str, float] = defaultdict(float)
+        self._n_component_steps: int = 0
 
     def visualize_generation(self, preds, labels):
 
