@@ -34,6 +34,64 @@ def all_values_equal(tensor):
 
 class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
+    def log(self, logs: Dict[str, float]) -> None:
+        """Inject averaged per-component OT/MT losses into logs before WandB sees them.
+
+        Component losses are accumulated in compute_loss and averaged here over the same
+        window as train/loss, so the equation loss ≈ mt_loss + ot_lambda * ot_loss holds.
+        """
+        if self._n_component_steps > 0:
+            for key, total in self._component_loss_sums.items():
+                logs[key] = total / self._n_component_steps
+            self._component_loss_sums = defaultdict(float)
+            self._n_component_steps = 0
+        super().log(logs)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """Composite loss: label-smoothed MT + OT (when model has an OT branch).
+
+        The default Trainer.compute_loss pops 'labels' before the model forward
+        when label_smoothing_factor > 0, then uses LabelSmoother for the loss.
+        For Siamese models this discards the OT losses returned by the model.
+
+        Fix: let the model run without labels (so outputs.loss = OT-only), then
+        add the label-smoothed MT loss on top.  When there is no label_smoother
+        (label_smoothing_factor == 0) the behaviour is identical to the default.
+        """
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+
+        if labels is not None and self.label_smoother is not None:
+            # outputs.loss == OT losses only (model received labels=None → mt=0).
+            # For pure-video / non-Siamese models outputs.loss is None → treat as 0.
+            smoothed_mt = self.label_smoother(outputs, labels)
+            ot_component = outputs.loss if outputs.loss is not None else torch.tensor(
+                0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype
+            )
+            loss = smoothed_mt + ot_component
+            # Keep _last_mt_loss consistent with what is actually backpropped.
+            raw = model.module if hasattr(model, "module") else model
+            if hasattr(raw, "_last_mt_loss"):
+                raw._last_mt_loss = smoothed_mt.detach().item()
+        else:
+            raw = model.module if hasattr(model, "module") else model
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        # Accumulate component losses for averaged logging (mirrors Trainer's tr_loss accumulation).
+        # Only during training; _last_* attrs are only set when model.training is True.
+        raw = model.module if hasattr(model, "module") else model
+        if raw.training:
+            for attr in ("_last_mt_loss", "_last_ot_loss", "_last_ot_mapper_loss", "_last_ot_encoder_loss"):
+                if hasattr(raw, attr):
+                    self._component_loss_sums[attr[len("_last_"):]] += getattr(raw, attr)
+            self._n_component_steps += 1
+
+        return (loss, outputs) if return_outputs else loss
+
     def __init__(
         self,
         model: Union["PreTrainedModel", nn.Module] = None,
@@ -74,6 +132,8 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         self.visualize_prediction_prob = visualize_prediction_prob
         self.print_decoder_prompt_on_prediction = print_decoder_prompt_on_prediction
         self.print_special_tokens_on_prediction = print_special_tokens_on_prediction
+        self._component_loss_sums: Dict[str, float] = defaultdict(float)
+        self._n_component_steps: int = 0
 
     def visualize_generation(self, preds, labels):
 
