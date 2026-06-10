@@ -494,9 +494,15 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 audio_repr = self.audio_mapper(audio_repr)
 
             # Optional shared LayerNorm before mapper-level OT — aligns mean/std of both spaces.
+            # Applied only for OT computation; inputs_embeds is NOT modified so the backbone
+            # always receives the raw mapper output (avoids corrupting the M2M input distribution
+            # as ot_pre_norm drifts from identity during training).
             if self.ot_pre_norm is not None and self.config.ot_position != "encoder":
-                inputs_embeds = self.ot_pre_norm(inputs_embeds)
-                audio_repr = self.ot_pre_norm(audio_repr)
+                video_for_ot = self.ot_pre_norm(inputs_embeds)
+                audio_for_ot = self.ot_pre_norm(audio_repr)
+            else:
+                video_for_ot = inputs_embeds
+                audio_for_ot = audio_repr
 
             if self.config.ot_position == "encoder":
                 # ── OT at M2M encoder output ───────────────────────────────
@@ -564,8 +570,8 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             elif self.config.ot_position == "both":
                 # ── OT at mapper output AND at M2M encoder output ──────────
                 ot_mapper_loss = batch_sinkhorn_loss(
-                    x=inputs_embeds,
-                    y=audio_repr,
+                    x=video_for_ot,
+                    y=audio_for_ot,
                     x_mask=attention_mask,
                     y_mask=audio_mask,
                     epsilon=self.config.sinkhorn_epsilon,
@@ -636,8 +642,8 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             else:
                 # ── OT at mapper output (default) ──────────────────────────
                 ot_loss = batch_sinkhorn_loss(
-                    x=inputs_embeds,
-                    y=audio_repr,
+                    x=video_for_ot,
+                    y=audio_for_ot,
                     x_mask=attention_mask,
                     y_mask=audio_mask,
                     epsilon=self.config.sinkhorn_epsilon,
