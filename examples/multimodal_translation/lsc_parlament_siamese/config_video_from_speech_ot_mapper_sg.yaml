@@ -91,7 +91,7 @@ training:
   weight_decay: 0
   adam_beta1: 0.9
   adam_beta2: 0.998
-  max_grad_norm: 1.0
+  max_grad_norm: 0.0
   num_train_epochs: 1
   max_steps: 200000
   lr_scheduler_type: inverse_sqrt
