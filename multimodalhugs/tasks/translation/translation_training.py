@@ -146,6 +146,22 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
+    # Apply model-section params from YAML to the loaded config.
+    # AutoConfig.from_pretrained only accepts ModelArguments fields; all other model
+    # config params (freeze_backbone, ot_lambda, ot_pre_norm, sinkhorn_max_iter, …)
+    # would otherwise be silently ignored and left at the checkpoint's saved values.
+    if extra_args.config_path:
+        from omegaconf import OmegaConf
+        _yaml_model = OmegaConf.to_container(
+            OmegaConf.load(extra_args.config_path), resolve=True
+        ).get("model", {})
+        _meta_keys = {"model_name_or_path", "config_name", "type",
+                      "pretrained_backbone", "pretrained_feature_extractor",
+                      "audio_pretrained_feature_extractor"}
+        for _k, _v in _yaml_model.items():
+            if _k not in _meta_keys and hasattr(config, _k):
+                setattr(config, _k, _v)
+
     if hasattr(config, "max_new_tokens") and config.max_new_tokens is not None:
         # Avoids the warning about setting a value for both max_length and max_new_tokens
         config.max_length = None
