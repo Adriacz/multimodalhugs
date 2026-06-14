@@ -365,6 +365,13 @@ class JointMultiModalEmbedderModel(SiameseMultiModalEmbedderModel):
         mt_loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=next(self.parameters()).device)
         total_loss = mt_loss + self.config.ot_lambda * ot_loss
 
+        # Expose component losses for WandB logging (read by MultiLingualSeq2SeqTrainer).
+        # When label_smoothing > 0 the trainer pops labels, so mt_loss is 0 here and the
+        # trainer overwrites _last_mt_loss with the real smoothed MT loss afterwards.
+        if self.training:
+            self._last_ot_loss = float(ot_loss.detach().item())
+            self._last_mt_loss = float(mt_loss.detach().item())
+
         if not (return_dict if return_dict is not None else True):
             output = (outputs.logits,) + outputs[1:]
             return (total_loss,) + output if total_loss is not None else output
