@@ -92,7 +92,23 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             # outputs.loss == OT losses only (model received labels=None → mt=0).
             # For pure-video / non-Siamese models outputs.loss is None → treat as 0.
             smoothed_mt = self.label_smoother(outputs, labels)
-            ot_component = outputs.loss if outputs.loss is not None else torch.tensor(
+            # Evaluate once to avoid double attribute access on ModelOutput.
+            _raw_ot = getattr(outputs, "loss", None)
+            if not isinstance(_raw_ot, (torch.Tensor, type(None))):
+                _m = model.module if hasattr(model, "module") else model
+                _c = getattr(_m, "config", None)
+                raise RuntimeError(
+                    f"[compute_loss] outputs.loss has unexpected type "
+                    f"{type(_raw_ot).__name__!r} (expected Tensor or None).\n"
+                    f"  type(outputs)          = {type(outputs).__name__!r}\n"
+                    f"  outputs keys           = {list(outputs.keys()) if hasattr(outputs, 'keys') else 'N/A'}\n"
+                    f"  repr(outputs.loss)     = {_raw_ot!r}\n"
+                    f"  config.ot_lambda       = {getattr(_c, 'ot_lambda', 'N/A')}\n"
+                    f"  config.ot_lambda_enc   = {getattr(_c, 'ot_lambda_encoder', 'N/A')}\n"
+                    f"  config.ot_position     = {getattr(_c, 'ot_position', 'N/A')}\n"
+                    f"  model class            = {type(_m).__name__!r}"
+                )
+            ot_component = _raw_ot if _raw_ot is not None else torch.tensor(
                 0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype
             )
             loss = smoothed_mt + ot_component
