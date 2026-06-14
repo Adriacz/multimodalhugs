@@ -69,9 +69,13 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
             # outputs.loss == OT losses only (model received labels=None → mt=0).
             # For pure-video / non-Siamese models outputs.loss is None → treat as 0.
             smoothed_mt = self.label_smoother(outputs, labels)
-            ot_component = outputs.loss if outputs.loss is not None else torch.tensor(
-                0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype
-            )
+            ot_raw = outputs.loss if not isinstance(outputs, dict) else outputs.get("loss")
+            if isinstance(ot_raw, dict):
+                ot_component = sum(v for v in ot_raw.values() if v is not None)
+            elif ot_raw is not None:
+                ot_component = ot_raw
+            else:
+                ot_component = torch.tensor(0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype)
             loss = smoothed_mt + ot_component
             # Keep _last_mt_loss consistent with what is actually backpropped.
             raw = model.module if hasattr(model, "module") else model
