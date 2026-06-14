@@ -1,0 +1,6 @@
+from .modeling_joint_multimodal_embedder import JointMultiModalEmbedderModel
+from .configuration_joint_multimodal_embedder import JointMultiModalEmbedderConfig
+
+MODEL_CLASS = JointMultiModalEmbedderModel
+CONFIG_CLASS = JointMultiModalEmbedderConfig
+CONFIG_NAME = "joint_multimodal_embedder"

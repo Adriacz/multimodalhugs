@@ -348,6 +348,30 @@ En `translation_training.py`, `resolve_checkpoint_path_from_general_setup_path` 
 
 ---
 
+## Modelo Joint (Versión D — joint_multimodal_embedder)
+
+**Fichero:** `multimodalhugs/models/joint_multimodal_embedder/`
+
+Variante que pasa **ambas modalidades** (vídeo + audio) al backbone M2M como secuencia fusionada.
+
+**Forward training:**
+1. Video: FE → Mapper → `video_repr [B, T_v, D]`
+2. Audio: AudioFE → AudioMapper → `audio_repr [B, T_a, D]`
+3. OT: `batch_sinkhorn_loss(video_repr, audio_repr)` antes de fusionar
+4. Fusion: `cat([video_repr, audio_repr], dim=1)` → `fused [B, T_v+T_a, D]`
+5. M2M: `merge_modalities(fused)` → backbone → `mt_loss`
+6. Total: `mt_loss + ot_lambda * ot_loss`
+
+**Inferencia:**
+- Video-only (`input_audio=None`): delega a `MultiModalEmbedderModel`
+- Audio-only (`input_frames=None`): `_forward_audio_only` (heredado del siamese)
+- Ambos: secuencia fusionada al M2M (igual que training)
+
+**YAML:** usar `type: joint_multimodal_embedder`. Mismos parámetros que `siamese_multimodal_embedder`.
+`ot_position` solo aplica `"mapper"` (el OT se hace siempre en la salida del mapper, antes de fusionar).
+
+---
+
 ## Experimentos de video-from-speech (Fase 2)
 
 Tres versiones, cada una en su propia rama. Todas warm-start desde el speech checkpoint.

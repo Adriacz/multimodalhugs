@@ -1,0 +1,175 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Joint model — Video + Audio fused to M2M backbone
+#
+# Architecture (training):
+#   Video:  CLIP (trainable) → VideoMapper (trainable) → video_repr [B, T_v, D]
+#   Audio:  Whisper (frozen) → AudioMapper (trainable) → audio_repr [B, T_a, D]
+#   OT:     batch_sinkhorn_loss(video_repr, audio_repr) at mapper output
+#   Fusion: cat([video_repr, audio_repr], dim=1) → fused [B, T_v+T_a, D]
+#           → merge_modalities → M2M encoder + decoder → MT loss
+#   Loss:   MT_loss + ot_lambda * OT_loss
+#
+# Architecture (eval, audio pass):
+#   Audio:  Whisper (frozen) → AudioMapper → merge_modalities → M2M
+#
+# Warm-start: M2M + Whisper + AudioMapper from speech checkpoint.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  type: joint_multimodal_embedder
+
+  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5
+
+  # Video encoder — CLIP, trainable
+  feature_extractor_type: clip
+  pretrained_feature_extractor: openai/clip-vit-base-patch32
+  feat_dim: 512
+  freeze_feature_extractor: false
+
+  # Video mapper — trainable
+  multimodal_mapper_type: linear
+  multimodal_mapper_layer_norm_before: true
+  multimodal_mapper_layer_norm: false
+  multimodal_mapper_activation: false
+  multimodal_mapper_dropout: 0.1
+  freeze_multimodal_mapper: false
+
+  # Backbone — weights from speech checkpoint
+  backbone_type: m2m_100
+  pretrained_backbone: facebook/m2m100_418M
+  freeze_backbone: false
+  freeze_decoder_embed_tokens: false
+  freeze_encoder_embed_tokens: false
+  freeze_lm_head: false
+  max_length: 100
+
+  # Audio — Whisper frozen (teacher anchor)
+  audio_feature_extractor_type: whisper
+  audio_pretrained_feature_extractor: openai/whisper-medium
+  audio_feat_dim: 1024
+  audio_freeze_feature_extractor: true
+
+  # Audio mapper — trainable (needs to adapt alongside video in joint space)
+  audio_multimodal_mapper_type: linear
+  audio_multimodal_mapper_layer_norm_before: true
+  audio_multimodal_mapper_layer_norm: false
+  audio_multimodal_mapper_activation: false
+  audio_multimodal_mapper_dropout: 0.1
+  audio_freeze_multimodal_mapper: false
+
+  # OT at mapper output, before fusion
+  ot_lambda: 1.0
+  ot_lambda_encoder: 0.0
+  sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  ot_position: mapper
+
+  # Dual eval: video + audio
+  eval_audio: true
+
+setup:
+  seed: 3435
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_joint_video_audio
+
+training:
+  run_name: lsc_joint_video_audio
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_video_audio
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_video_audio
+  do_train: true
+  do_eval: true
+  predict_with_generate: true
+  overwrite_output_dir: true
+  eval_strategy: steps
+  save_strategy: steps
+  eval_steps: 500
+  save_steps: 500
+  logging_steps: 100
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 5e-5
+  weight_decay: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.998
+  max_grad_norm: 1.0
+  num_train_epochs: 1
+  max_steps: 200000
+  lr_scheduler_type: inverse_sqrt
+  warmup_steps: 8000
+  save_total_limit: 2
+  seed: 3435
+  dataloader_drop_last: false
+  metric_for_best_model: sacrebleu
+  metric_name: sacrebleu,chrf
+  greater_is_better: true
+  load_best_model_at_end: true
+  remove_unused_columns: false
+  dataloader_num_workers: 10
+  dataloader_prefetch_factor: 4
+  early_stopping_patience: 5
+  fp16: true
+  label_smoothing_factor: 0.1
+
+data:
+  dataset_type: videoaudio2text
+  name: lsc_parlament_joint
+  train_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/train.tsv
+  validation_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/validation.tsv
+  test_metadata_file: /home/usuaris.new/carlos.escolano/lsc-parlament/ca_filtered/test.tsv
+  shuffle: true
+  max_frames: 700
+
+processor:
+  slots:
+    - processor_class: VideoModalityProcessor
+      output_data_key: input_frames
+      output_mask_key: attention_mask
+      column_map:
+        video_signal: signal
+        signal_start: signal_start
+        signal_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/clip-vit-base-patch32
+        join_chw: false
+        skip_frames_stride: 3
+
+    - processor_class: SpeechModalityProcessor
+      output_data_key: input_audio
+      output_mask_key: audio_attention_mask
+      column_map:
+        audio_signal: signal
+        audio_start: signal_start
+        audio_end: signal_end
+      processor_kwargs:
+        custom_preprocessor_path: openai/whisper-medium
+
+    - processor_class: TextModalityProcessor
+      output_data_key: labels
+      is_label: true
+      column_map:
+        decoder_prompt: target_prefix
+        output: target
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: target
+
+    - processor_class: TextModalityProcessor
+      output_data_key: encoder_prompt
+      output_mask_key: encoder_prompt_length_padding_mask
+      column_map:
+        encoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
+
+    - processor_class: TextModalityProcessor
+      output_data_key: decoder_input_ids
+      output_mask_key: decoder_attention_mask
+      column_map:
+        decoder_prompt: signal
+      processor_kwargs:
+        tokenizer_path: facebook/m2m100_418M
+        new_vocabulary: "__lsc__"
+        role: input
