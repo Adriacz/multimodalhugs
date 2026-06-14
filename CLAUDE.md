@@ -348,27 +348,32 @@ En `translation_training.py`, `resolve_checkpoint_path_from_general_setup_path` 
 
 ---
 
-## Modelo Joint (Versión D — joint_multimodal_embedder)
+## Modelo Joint (joint_multimodal_embedder) — multi-task asimétrico
 
 **Fichero:** `multimodalhugs/models/joint_multimodal_embedder/`
 
-Variante que pasa **ambas modalidades** (vídeo + audio) al backbone M2M como secuencia fusionada.
+Multi-task asimétrico: vídeo dominante (+ OT) con una minoría de pasos de audio-solo
+como "repaso" anti-olvido. El audio ya parte muy bien (warm-start), así que no se
+re-aprende, solo se evita que el decoder lo olvide.
 
-**Forward training:**
-1. Video: FE → Mapper → `video_repr [B, T_v, D]`
-2. Audio: AudioFE → AudioMapper → `audio_repr [B, T_a, D]`
-3. OT: `batch_sinkhorn_loss(video_repr, audio_repr)` antes de fusionar
-4. Fusion: `cat([video_repr, audio_repr], dim=1)` → `fused [B, T_v+T_a, D]`
-5. M2M: `merge_modalities(fused)` → backbone → `mt_loss`
-6. Total: `mt_loss + ot_lambda * ot_loss`
+**Sampler por step de training** (ambas modalidades en el batch):
+- `p_audio_only` → audio-solo (ASR): Whisper(frozen) → AudioMapper → M2M (MT loss). Sin OT.
+- `p_joint_fusion` → fusión `cat([video, audio])` → M2M (+ OT). **Off por defecto** (riesgo de muleta de audio).
+- resto → **vídeo + OT**: CLIP → VideoMapper → M2M (MT loss), OT(video, audio) en salida del mapper como aux. El backbone ve **solo vídeo** — este es el path usado en inferencia.
 
-**Inferencia:**
-- Video-only (`input_audio=None`): delega a `MultiModalEmbedderModel`
-- Audio-only (`input_frames=None`): `_forward_audio_only` (heredado del siamese)
-- Ambos: secuencia fusionada al M2M (igual que training)
+OT siempre se computa en la salida del mapper (el joint **ignora** `ot_position` "encoder"/"both";
+solo hace mapper-OT). El OT y el MT se loggean separados en WandB (`ot_loss`, `mt_loss`).
 
-**YAML:** usar `type: joint_multimodal_embedder`. Mismos parámetros que `siamese_multimodal_embedder`.
-`ot_position` solo aplica `"mapper"` (el OT se hace siempre en la salida del mapper, antes de fusionar).
+**Generación / eval** (`generation_mode`, default `"video"`):
+- `eval_sacrebleu` → generación **solo-vídeo** (el objetivo real)
+- `eval_audio_sacrebleu` → solo-audio (pass de audio eval del trainer)
+- `"joint"` → generación fusionada (si se quiere)
+
+**Params nuevos del config:** `p_audio_only` (0.0), `p_joint_fusion` (0.0), `generation_mode` ("video").
+Con ambos a 0 el modelo se comporta como el siamese (vídeo + OT). Setting recomendado:
+`p_audio_only: 0.2`, `p_joint_fusion: 0.0`, audio mapper congelado.
+
+**YAML:** `examples/multimodal_translation/lsc_parlament_siamese/config_joint_video_audio.yaml`.
 
 ---
 

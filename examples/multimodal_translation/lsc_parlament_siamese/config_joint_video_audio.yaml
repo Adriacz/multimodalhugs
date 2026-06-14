@@ -1,16 +1,17 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Joint model — Video + Audio fused to M2M backbone
+# Joint model — asymmetric multi-task: video (dominant) + OT, with a minority of
+# audio-only rehearsal steps so the warm-started decoder doesn't forget.
 #
-# Architecture (training):
-#   Video:  CLIP (trainable) → VideoMapper (trainable) → video_repr [B, T_v, D]
-#   Audio:  Whisper (frozen) → AudioMapper (trainable) → audio_repr [B, T_a, D]
-#   OT:     batch_sinkhorn_loss(video_repr, audio_repr) at mapper output
-#   Fusion: cat([video_repr, audio_repr], dim=1) → fused [B, T_v+T_a, D]
-#           → merge_modalities → M2M encoder + decoder → MT loss
-#   Loss:   MT_loss + ot_lambda * OT_loss
+# Per training step (both modalities in the batch):
+#   p_audio_only (0.2) → audio-only ASR rehearsal: Whisper(frozen) → AudioMapper
+#                        → M2M (MT loss). Keeps the decoder sharp on Catalan. No OT.
+#   p_joint_fusion (0) → fused cat([video, audio]) → M2M (off by default).
+#   remainder    (0.8) → video + OT: CLIP → VideoMapper → M2M (MT loss),
+#                        OT(video, audio) at mapper output as alignment aux.
 #
-# Architecture (eval, audio pass):
-#   Audio:  Whisper (frozen) → AudioMapper → merge_modalities → M2M
+# Eval (generation_mode: video):
+#   eval_sacrebleu        → VIDEO-only generation  (the real goal)
+#   eval_audio_sacrebleu  → audio-only generation
 #
 # Warm-start: M2M + Whisper + AudioMapper from speech checkpoint.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -18,7 +19,7 @@
 model:
   type: joint_multimodal_embedder
 
-  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5
+  pretrained_speech_checkpoint: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_speech_v5/train/checkpoint-best
 
   # Video encoder — CLIP, trainable
   feature_extractor_type: clip
@@ -41,7 +42,7 @@ model:
   freeze_decoder_embed_tokens: false
   freeze_encoder_embed_tokens: false
   freeze_lm_head: false
-  max_length: 100
+  max_length: 200
 
   # Audio — Whisper frozen (teacher anchor)
   audio_feature_extractor_type: whisper
@@ -49,19 +50,24 @@ model:
   audio_feat_dim: 1024
   audio_freeze_feature_extractor: true
 
-  # Audio mapper — trainable (needs to adapt alongside video in joint space)
+  # Audio mapper — frozen: warm-started from speech checkpoint, kept as a stable
+  # anchor (it already maps Whisper → M2M space well).
   audio_multimodal_mapper_type: linear
   audio_multimodal_mapper_layer_norm_before: true
   audio_multimodal_mapper_layer_norm: false
   audio_multimodal_mapper_activation: false
   audio_multimodal_mapper_dropout: 0.1
-  audio_freeze_multimodal_mapper: false
+  audio_freeze_multimodal_mapper: true
 
-  # OT at mapper output, before fusion
-  ot_lambda: 1.0
-  ot_lambda_encoder: 0.0
+  # Multi-task sampler: mostly video+OT, some audio rehearsal, no fusion.
+  p_audio_only: 0.2
+  p_joint_fusion: 0.0
+  generation_mode: video
+
+  # OT at mapper output (light)
+  ot_lambda: 0.1
   sinkhorn_epsilon: 0.1
-  sinkhorn_max_iter: 100
+  sinkhorn_max_iter: 50
   ot_position: mapper
 
   # Dual eval: video + audio
@@ -69,16 +75,16 @@ model:
 
 setup:
   seed: 3435
-  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_joint_video_audio
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/setup_joint_multitask
 
 training:
-  run_name: lsc_joint_video_audio
-  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_video_audio
-  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_video_audio
+  run_name: lsc_joint_multitask
+  output_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_multitask
+  logging_dir: /home/usuaris.new/adria.capdevila.zurita/lsc-parlament/checkpoints_joint_multitask
   do_train: true
   do_eval: true
   predict_with_generate: true
-  overwrite_output_dir: true
+  overwrite_output_dir: false
   eval_strategy: steps
   save_strategy: steps
   eval_steps: 500
@@ -92,7 +98,6 @@ training:
   adam_beta1: 0.9
   adam_beta2: 0.998
   max_grad_norm: 1.0
-  num_train_epochs: 1
   max_steps: 200000
   lr_scheduler_type: inverse_sqrt
   warmup_steps: 8000
@@ -106,7 +111,7 @@ training:
   remove_unused_columns: false
   dataloader_num_workers: 10
   dataloader_prefetch_factor: 4
-  early_stopping_patience: 5
+  early_stopping_patience: 6
   fp16: true
   label_smoothing_factor: 0.1
 
