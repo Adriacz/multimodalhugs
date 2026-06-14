@@ -20,6 +20,7 @@ import logging
 from typing import Optional, Tuple, Union, Dict
 
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 from transformers.modeling_outputs import Seq2SeqLMOutput
 
@@ -103,6 +104,33 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         )
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _audio_valid_mask(
+        self,
+        audio_repr: torch.Tensor,
+        audio_attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Convert a mel-level attention mask to a Whisper encoder-output mask.
+
+        SpeechModalityProcessor truncates the mel to n_valid_mel frames so
+        process_batch produces audio_attention_mask [B, n_valid_mel].  The
+        model pads back to 3000 before Whisper (stride-2 conv), so T_a is
+        always 1500.  Conversion: valid_enc = ceil(n_valid_mel / 2).
+        Falls back to all-ones when no mask is provided.
+        """
+        B_a, T_a = audio_repr.shape[:2]
+        if audio_attention_mask is not None:
+            valid_mel = audio_attention_mask.sum(dim=1).long()          # [B]
+            valid_enc = ((valid_mel + 1) // 2).clamp(max=T_a)          # ceil(n/2)
+            mask = torch.zeros((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            for i in range(B_a):
+                mask[i, : valid_enc[i].item()] = 1
+            return mask
+        return torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+
+    # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
@@ -164,10 +192,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         return_dict: Optional[bool] = None,
     ):
         if input_frames is None and input_audio is not None:
+            if input_audio.shape[-1] < 3000:
+                input_audio = F.pad(input_audio, (0, 3000 - input_audio.shape[-1]))
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)
-            B_a, T_a = audio_repr.shape[:2]
-            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            audio_mask = self._audio_valid_mask(audio_repr, audio_attention_mask)
             if isinstance(self.audio_mapper, MultimodalMapper):
                 audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
             elif self.audio_mapper is not None:
@@ -200,6 +229,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         self,
         input_audio: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
+        audio_attention_mask: Optional[torch.Tensor],
         encoder_prompt: Optional[torch.LongTensor],
         encoder_prompt_length_padding_mask: Optional[torch.LongTensor],
         decoder_input_ids: Optional[torch.LongTensor],
@@ -224,11 +254,12 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 decoder_input_ids = None
                 decoder_attention_mask = None
 
+            if input_audio.shape[-1] < 3000:
+                input_audio = F.pad(input_audio, (0, 3000 - input_audio.shape[-1]))
             with torch.no_grad() if self.config.audio_freeze_feature_extractor else torch.enable_grad():
                 audio_repr = self.audio_feature_extractor(input_audio)
 
-            B_a, T_a = audio_repr.shape[:2]
-            audio_mask = torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
+            audio_mask = self._audio_valid_mask(audio_repr, audio_attention_mask)
 
             if isinstance(self.audio_mapper, MultimodalMapper):
                 audio_repr, audio_mask = self.audio_mapper(audio_repr, audio_mask)
@@ -377,6 +408,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
             return self._forward_audio_only(
                 input_audio=input_audio,
                 attention_mask=attention_mask,
+                audio_attention_mask=audio_attention_mask,
                 encoder_prompt=encoder_prompt,
                 encoder_prompt_length_padding_mask=encoder_prompt_length_padding_mask,
                 decoder_input_ids=decoder_input_ids,

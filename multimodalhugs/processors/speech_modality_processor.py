@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -320,6 +321,17 @@ class SpeechModalityProcessor(ModalityProcessor):
                     )
                     # Most HF audio processors return `input_features` [1, n_mels, T]
                     result = features["input_features"].squeeze(0)  # → [n_mels, T]
+
+                    # WhisperFeatureExtractor always pads to 3000 mel frames (30 s).
+                    # Truncate to the number of valid frames so that process_batch
+                    # produces a meaningful audio_attention_mask instead of all-ones.
+                    n_valid_samples = waveform.shape[-1]
+                    hop = getattr(
+                        getattr(self.custom_preprocessor, "feature_extractor", self.custom_preprocessor),
+                        "hop_length", 160,
+                    )
+                    n_valid_mel = min(math.ceil(n_valid_samples / hop), result.shape[-1])
+                    result = result[:, :n_valid_mel]
                 else:
                     result = self._mel_transform(waveform).squeeze(0)  # → [n_mels, T]
 
