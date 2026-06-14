@@ -74,16 +74,24 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
         super().log(logs)
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        """Composite loss: label-smoothed MT + OT (when model has an OT branch).
+        """Composite loss: label-smoothed MT + OT (when model has an active OT branch).
 
-        The default Trainer.compute_loss pops 'labels' before the model forward
-        when label_smoothing_factor > 0, then uses LabelSmoother for the loss.
-        For Siamese models this discards the OT losses returned by the model.
+        When OT is active (ot_lambda > 0 or ot_lambda_encoder > 0): pop labels before
+        the forward so the model returns OT-only loss, then add label-smoothed MT on top.
 
-        Fix: let the model run without labels (so outputs.loss = OT-only), then
-        add the label-smoothed MT loss on top.  When there is no label_smoother
-        (label_smoothing_factor == 0) the behaviour is identical to the default.
+        When OT is disabled: delegate to the default Trainer.compute_loss, which handles
+        label_smoothing correctly without interfering with the model's forward pass.
         """
+        _m = model.module if hasattr(model, "module") else model
+        _c = getattr(_m, "config", None)
+        _ot_active = (
+            getattr(_c, "ot_lambda", 0.0) != 0.0
+            or getattr(_c, "ot_lambda_encoder", 0.0) != 0.0
+        )
+
+        if not _ot_active:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs)
+
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -93,34 +101,11 @@ class MultiLingualSeq2SeqTrainer(Seq2SeqTrainer):
 
         if labels is not None and self.label_smoother is not None:
             # outputs.loss == OT losses only (model received labels=None → mt=0).
-            # For pure-video / non-Siamese models outputs.loss is None → treat as 0.
             smoothed_mt = self.label_smoother(outputs, labels)
-            # Evaluate once to avoid double attribute access on ModelOutput.
             _raw_ot = getattr(outputs, "loss", None)
-            if isinstance(_raw_ot, torch.Tensor):
-                ot_component = _raw_ot
-            elif _raw_ot is None:
-                ot_component = torch.tensor(0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype)
-            else:
-                # outputs.loss is a ModelOutput (e.g. Seq2SeqLMOutput) instead of a scalar.
-                # This happens when the model's early-exit returns super().forward() directly
-                # and the output is treated as the loss field. Extract the scalar from inside.
-                _m = model.module if hasattr(model, "module") else model
-                _c = getattr(_m, "config", None)
-                logger.warning(
-                    "[compute_loss] outputs.loss has unexpected type %r (expected Tensor or None). "
-                    "config.ot_lambda=%s, config.ot_lambda_encoder=%s, config.ot_position=%s, "
-                    "model class=%r. Extracting nested .loss as OT component.",
-                    type(_raw_ot).__name__,
-                    getattr(_c, "ot_lambda", "N/A"),
-                    getattr(_c, "ot_lambda_encoder", "N/A"),
-                    getattr(_c, "ot_position", "N/A"),
-                    type(_m).__name__,
-                )
-                _inner = getattr(_raw_ot, "loss", None)
-                ot_component = _inner if isinstance(_inner, torch.Tensor) else torch.tensor(
-                    0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype
-                )
+            ot_component = _raw_ot if isinstance(_raw_ot, torch.Tensor) else torch.tensor(
+                0.0, device=smoothed_mt.device, dtype=smoothed_mt.dtype
+            )
             loss = smoothed_mt + ot_component
             # Keep _last_mt_loss consistent with what is actually backpropped.
             raw = model.module if hasattr(model, "module") else model
