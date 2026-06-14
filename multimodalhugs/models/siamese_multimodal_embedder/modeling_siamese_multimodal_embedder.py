@@ -131,6 +131,21 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         return torch.ones((B_a, T_a), dtype=torch.long, device=audio_repr.device)
 
     # ------------------------------------------------------------------
+    # Train mode — keep frozen/no-grad submodules in eval mode
+    # ------------------------------------------------------------------
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            # Frozen audio branch: keep in eval mode to prevent dropout-noise
+            # in audio representations used as OT target.
+            if getattr(self.config, "audio_freeze_feature_extractor", False) and self.audio_feature_extractor is not None:
+                self.audio_feature_extractor.eval()
+            if getattr(self.config, "audio_freeze_multimodal_mapper", False) and self.audio_mapper is not None:
+                self.audio_mapper.eval()
+        return self
+
+    # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
@@ -492,6 +507,9 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                     attention_mask=attention_mask,
                 )
 
+                # OT target: backbone encoder must be deterministic (no dropout)
+                # even though it is trainable. We temporarily set it to eval mode.
+                self.get_backbone_encoder.eval()
                 with torch.no_grad():
                     audio_inputs_embeds, audio_enc_attn = merge_modalities(
                         x=audio_repr,
@@ -506,6 +524,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                         inputs_embeds=audio_inputs_embeds,
                         attention_mask=audio_enc_attn,
                     )
+                self.get_backbone_encoder.train()
 
                 ot_loss = batch_sinkhorn_loss(
                     x=video_enc_out.last_hidden_state,
@@ -578,6 +597,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                         inputs_embeds=audio_inputs_embeds,
                         attention_mask=audio_enc_attn,
                     )
+                self.get_backbone_encoder.train()
 
                 ot_encoder_loss = batch_sinkhorn_loss(
                     x=video_enc_out.last_hidden_state,

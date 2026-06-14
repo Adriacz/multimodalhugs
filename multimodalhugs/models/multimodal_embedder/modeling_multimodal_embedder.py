@@ -142,6 +142,18 @@ class MultiModalEmbedderModel(PreTrainedModel):
         self._no_split_modules = self._no_split_modules + (getattr(self.backbone, "_no_split_modules", []) or [])
         self._keep_in_fp32_modules = self._keep_in_fp32_modules + (getattr(self.backbone, "_keep_in_fp32_modules", []) or [])
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Frozen submodules must stay in eval mode so their dropout layers are inactive.
+        # set_module_parameters only zeros requires_grad; calling .train() on the whole
+        # model would re-enable dropout and make gradients through frozen modules noisy.
+        if mode:
+            if getattr(self.config, "freeze_backbone", False):
+                self.backbone.eval()
+            if getattr(self.config, "freeze_feature_extractor", False) and self.feature_extractor is not None:
+                self.feature_extractor.eval()
+        return self
+
     def get_input_embeddings(self):
         """
         **Retrieve the input embeddings.**
