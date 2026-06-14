@@ -356,17 +356,7 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         When both are provided → Siamese training mode (OT + MT loss).
         """
         # ── Pure-video fallback ────────────────────────────────────────────
-        import sys
-        _dbg = (
-            f"[SiameseFWD] ot_lambda={self.config.ot_lambda!r}(type={type(self.config.ot_lambda).__name__}) "
-            f"ot_lambda_encoder={self.config.ot_lambda_encoder!r}(type={type(self.config.ot_lambda_encoder).__name__}) "
-            f"input_audio_is_None={input_audio is None} "
-            f"input_frames_is_None={input_frames is None} "
-            f"audio_FE_is_None={self.audio_feature_extractor is None}"
-        )
-        print(_dbg, file=sys.stderr, flush=True)
         if input_audio is None or self.audio_feature_extractor is None:
-            print("[SiameseFWD] → pure-video fallback", file=sys.stderr, flush=True)
             return super().forward(
                 input_frames=input_frames,
                 encoder_prompt=encoder_prompt,
@@ -393,7 +383,6 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
         # Only skip when input_frames is present (training); audio-only calls
         # (input_frames=None) must fall through to _forward_audio_only below.
         if self.config.ot_lambda == 0.0 and self.config.ot_lambda_encoder == 0.0 and input_frames is not None:
-            print("[SiameseFWD] → OT-disabled early-exit", file=sys.stderr, flush=True)
             return super().forward(
                 input_frames=input_frames,
                 encoder_prompt=encoder_prompt,
@@ -709,14 +698,11 @@ class SiameseMultiModalEmbedderModel(MultiModalEmbedderModel):
                 return_dict=True,
             )
 
-        _bb_loss_raw = outputs.loss
-        print(f"[SiameseFWD] backbone.loss type={type(_bb_loss_raw).__name__!r} is_none={_bb_loss_raw is None}", file=sys.stderr, flush=True)
-        mt_loss = _bb_loss_raw if _bb_loss_raw is not None else torch.tensor(0.0, device=next(self.parameters()).device)
+        mt_loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=next(self.parameters()).device)
         if self.config.ot_position == "both":
             total_loss = mt_loss + self.config.ot_lambda * ot_mapper_loss + self.config.ot_lambda_encoder * ot_encoder_loss
         else:
             total_loss = mt_loss + self.config.ot_lambda * ot_loss
-        print(f"[SiameseFWD] total_loss type={type(total_loss).__name__!r}", file=sys.stderr, flush=True)
 
         if self.training:
             self._last_mt_loss = mt_loss.detach().item()
