@@ -33,7 +33,7 @@ from multimodalhugs.models.joint_multimodal_embedder.configuration_joint_multimo
 )
 from multimodalhugs.modules import MultimodalMapper
 from multimodalhugs.modules.sinkhorn import batch_sinkhorn_loss
-from multimodalhugs.modules.utils import merge_modalities, merge_modalities_mask_correction
+from multimodalhugs.modules.utils import merge_modalities
 from multimodalhugs.utils.registry import register_model
 
 logger = logging.getLogger(__name__)
