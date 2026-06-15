@@ -274,7 +274,7 @@ def main():
     p.add_argument("--video_preprocessor", default=None)
     p.add_argument("--audio_preprocessor", default=None)
     p.add_argument("--skip_frames_stride", type=int, default=3)
-    p.add_argument("--retrieval_ks", type=int, nargs="+", default=[1, 5, 10])
+    p.add_argument("--retrieval_ks", type=int, nargs="+", default=[1, 5, 10, 100])
     p.add_argument("--n_cca_components", type=int, default=20)
     p.add_argument("--hubness_k", type=int, default=5)
     p.add_argument("--no_encoder", action="store_true", help="only analyse the mapper output")
